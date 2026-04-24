@@ -1,12 +1,5 @@
 create extension if not exists pgcrypto;
 
-create table if not exists public.app_settings (
-  key text primary key,
-  value text not null,
-  description text default '',
-  updated_at timestamptz not null default now()
-);
-
 create table if not exists public.admin_users (
   email text primary key,
   display_name text default '',
@@ -15,67 +8,17 @@ create table if not exists public.admin_users (
   updated_at timestamptz not null default now()
 );
 
-create table if not exists public.templates (
-  id text primary key default gen_random_uuid()::text,
-  owner_user_id uuid not null,
-  owner_email text not null,
-  name text not null,
-  description text default '',
-  category text default '일반 문서',
-  content text not null,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
+alter table public.templates add column if not exists owner_user_id uuid;
+alter table public.templates add column if not exists owner_email text;
 
-create table if not exists public.signature_requests (
-  id uuid primary key default gen_random_uuid(),
-  token uuid not null unique default gen_random_uuid(),
-  owner_user_id uuid not null,
-  owner_email text not null,
-  template_id text not null references public.templates(id) on delete cascade,
-  template_name text not null,
-  recipient_name text default '',
-  status text not null default 'SENT' check (status in ('SENT', 'VIEWED', 'COMPLETED', 'EXPIRED')),
-  requested_at timestamptz not null default now(),
-  opened_at timestamptz,
-  completed_at timestamptz,
-  expires_at timestamptz not null,
-  last_accessed_at timestamptz,
-  access_count integer not null default 0,
-  request_message text default '',
-  created_by text default ''
-);
+alter table public.signature_requests add column if not exists owner_user_id uuid;
+alter table public.signature_requests add column if not exists owner_email text;
 
-create table if not exists public.submissions (
-  id uuid primary key default gen_random_uuid(),
-  owner_user_id uuid not null,
-  owner_email text not null,
-  request_token uuid references public.signature_requests(token),
-  template_id text not null,
-  template_name text not null,
-  signer_name text default '',
-  signer_email text default '',
-  form_data jsonb not null default '{}'::jsonb,
-  signatures jsonb not null default '{}'::jsonb,
-  field_summary jsonb not null default '[]'::jsonb,
-  mode text not null default 'direct',
-  completed_at timestamptz not null default now(),
-  template_content_snapshot text not null,
-  verification_code text unique,
-  created_at timestamptz not null default now()
-);
+alter table public.submissions add column if not exists owner_user_id uuid;
+alter table public.submissions add column if not exists owner_email text;
 
-create table if not exists public.audit_logs (
-  id uuid primary key default gen_random_uuid(),
-  owner_user_id uuid,
-  owner_email text default '',
-  request_token uuid,
-  event_type text not null,
-  actor_name text default '',
-  actor_email text default '',
-  details jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now()
-);
+alter table public.audit_logs add column if not exists owner_user_id uuid;
+alter table public.audit_logs add column if not exists owner_email text default '';
 
 create or replace function public.is_allowed_admin()
 returns boolean
@@ -197,19 +140,5 @@ create policy audit_logs_owner_insert
 create index if not exists admin_users_active_idx on public.admin_users(is_active);
 create index if not exists templates_owner_user_idx on public.templates(owner_user_id);
 create index if not exists signature_requests_owner_user_idx on public.signature_requests(owner_user_id);
-create index if not exists signature_requests_token_idx on public.signature_requests(token);
-create index if not exists signature_requests_status_idx on public.signature_requests(status);
 create index if not exists submissions_owner_user_idx on public.submissions(owner_user_id);
-create index if not exists submissions_request_token_idx on public.submissions(request_token);
-create index if not exists submissions_verification_code_idx on public.submissions(verification_code);
 create index if not exists audit_logs_owner_user_idx on public.audit_logs(owner_user_id);
-create index if not exists audit_logs_request_token_idx on public.audit_logs(request_token);
-
-insert into public.app_settings (key, value, description)
-values
-  (
-    'PrivacyPolicy',
-    '전자문서 작성과 서명 처리를 위해 필요한 개인정보를 수집 및 이용합니다. 수집 항목과 보관 기간은 기관 정책에 따라 운영자가 직접 고지해야 합니다.',
-    '서명 화면에 표시되는 개인정보 수집 및 이용 안내 문구'
-  )
-on conflict (key) do nothing;

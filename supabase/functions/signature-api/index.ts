@@ -1,4 +1,4 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.43.4";
+import { createClient, type User } from "https://esm.sh/@supabase/supabase-js@2.43.4";
 
 type FieldType = "text" | "date" | "check" | "sign";
 
@@ -12,6 +12,23 @@ type TemplateField = {
   size: string;
 };
 
+type AuthState = {
+  loggedIn: boolean;
+  authorized: boolean;
+  userId: string;
+  email: string;
+  displayName: string;
+  rawUser: User | null;
+  accessToken: string;
+};
+
+type TemplateSeed = {
+  name: string;
+  description: string;
+  category: string;
+  content: string;
+};
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -21,12 +38,34 @@ const corsHeaders = {
 const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
 const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 const publicSiteUrl = Deno.env.get("PUBLIC_SITE_URL") || "";
-const adminPassword = Deno.env.get("ADMIN_PASSWORD") || "admin1234";
-const sessionTtlHours = Number(Deno.env.get("SESSION_TTL_HOURS") || "6");
 
-const db = createClient(supabaseUrl, serviceRoleKey, {
+const adminDb = createClient(supabaseUrl, serviceRoleKey, {
   auth: { persistSession: false },
 });
+
+const defaultTemplates: TemplateSeed[] = [
+  {
+    name: "개인정보 수집 이용 동의서",
+    description: "기본 개인정보 동의 양식입니다.",
+    category: "동의",
+    content:
+      '<section class="doc-heading"><p>CONSENT</p><h1>개인정보 수집 이용 동의서</h1></section><p>아래 내용을 확인하고 개인정보 수집 및 이용에 동의합니다.</p><table class="doc-table"><tr><th>성명</th><td>[[text:성명|required|placeholder=성명을 입력하세요]]</td></tr><tr><th>생년월일</th><td>[[text:생년월일|required|placeholder=예: 1970-01-01]]</td></tr><tr><th>연락처</th><td>[[text:연락처|required|placeholder=010-0000-0000]]</td></tr></table><p>[[check:개인정보동의|required|label=개인정보 수집 및 이용에 동의합니다.]]</p><p>본인 서명: [[sign:본인서명|required|role=본인]]</p>',
+  },
+  {
+    name: "프로그램 참여 신청서",
+    description: "프로그램 신청에 필요한 기본 신청서입니다.",
+    category: "신청",
+    content:
+      '<section class="doc-heading"><p>APPLICATION</p><h1>프로그램 참여 신청서</h1></section><table class="doc-table"><tr><th>프로그램명</th><td>[[text:프로그램명|required|placeholder=프로그램명을 입력하세요]]</td></tr><tr><th>참여자 성명</th><td>[[text:참여자성명|required|placeholder=성명을 입력하세요]]</td></tr><tr><th>연락처</th><td>[[text:연락처|required|placeholder=010-0000-0000]]</td></tr></table><p>[[check:참여동의|required|label=프로그램 운영 안내와 유의사항을 확인했습니다.]]</p><p>참여자 서명: [[sign:참여자서명|required|role=참여자]]</p>',
+  },
+  {
+    name: "서약서",
+    description: "확인 및 서약이 필요한 문서용 기본 양식입니다.",
+    category: "서약",
+    content:
+      '<section class="doc-heading"><p>PLEDGE</p><h1>서약서</h1></section><p>본인은 아래 내용을 확인하고 성실히 이행할 것을 서약합니다.</p><table class="doc-table"><tr><th>성명</th><td>[[text:성명|required|placeholder=성명을 입력하세요]]</td></tr><tr><th>작성일</th><td>[[date:작성일|required]]</td></tr></table><p>[[check:서약확인|required|label=서약 내용을 확인했습니다.]]</p><p>서명: [[sign:서약자서명|required|role=서약자]]</p>',
+  },
+];
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") {
@@ -39,32 +78,28 @@ Deno.serve(async (request) => {
 
   try {
     const body = await request.json().catch(() => ({}));
-    const action = String(body.action || "").trim();
-    const payload = body.payload || {};
-    const authHeader = request.headers.get("authorization") || "";
-    const sessionToken = String(body.sessionToken || authHeader.replace(/^Bearer\s+/i, "") || "").trim();
+    const action = stringValue(body.action);
+    const payload = objectValue(body.payload);
 
     switch (action) {
       case "bootstrap":
-        return json(await bootstrap(payload));
-      case "adminLogin":
-        return json(await adminLogin(payload));
+        return json(await bootstrap(payload, request));
       case "adminDashboard":
-        return json(await adminDashboard(sessionToken));
+        return json(await adminDashboard(request));
       case "createSignatureRequest":
-        return json(await createSignatureRequest(payload, sessionToken, request));
+        return json(await createSignatureRequest(payload, request));
       case "markRequestViewed":
         return json(await markRequestViewed(payload));
       case "saveSignature":
-        return json(await saveSignature(payload));
+        return json(await saveSignature(payload, request));
       case "saveTemplateConfig":
-        return json(await saveTemplateConfig(payload, sessionToken));
+        return json(await saveTemplateConfig(payload, request));
       case "getSubmissionDetail":
-        return json(await getSubmissionDetail(payload, sessionToken));
+        return json(await getSubmissionDetail(payload, request));
       case "verifySubmissionByCode":
         return json(await verifySubmissionByCode(payload));
       default:
-        return json({ error: "알 수 없는 작업입니다." }, 400);
+        return json({ error: "지원하지 않는 작업입니다." }, 400);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "처리 중 오류가 발생했습니다.";
@@ -72,117 +107,110 @@ Deno.serve(async (request) => {
   }
 });
 
-async function bootstrap(payload: Record<string, unknown>) {
-  const templates = await getTemplates();
+async function bootstrap(payload: Record<string, unknown>, request: Request) {
   const settings = await getSettings();
   const requestToken = stringValue(payload.requestToken);
   const templateId = stringValue(payload.templateId);
-  let request = null;
+  const authState = await getAuthState(request);
+
+  if (authState.authorized) {
+    await ensureDefaultTemplates(authState);
+  }
+
+  let templates: Record<string, unknown>[] = [];
+  let requestRow: Record<string, unknown> | null = null;
+  let selectedTemplate: Record<string, unknown> | null = null;
 
   if (requestToken) {
-    request = await getRequestByToken(requestToken);
-    if (!request) {
+    requestRow = await getRequestByToken(requestToken);
+    if (!requestRow) {
       throw new Error("서명 요청 정보를 찾을 수 없습니다.");
     }
-    request = await normalizeRequestState(request);
+    requestRow = await normalizeRequestState(requestRow);
+    selectedTemplate = await getTemplateById(stringValue(requestRow.template_id));
+    if (!selectedTemplate) {
+      throw new Error("요청에 연결된 양식을 찾을 수 없습니다.");
+    }
+    templates = [selectedTemplate];
+  } else if (authState.authorized) {
+    templates = await getOwnedTemplates(authState.userId);
+    if (templateId) {
+      selectedTemplate = templates.find((template) => stringValue(template.id) === templateId) || null;
+      if (!selectedTemplate) {
+        throw new Error("선택한 양식을 찾을 수 없습니다.");
+      }
+    }
   }
 
-  const selectedTemplateId = request ? request.template_id : templateId;
-  const selectedTemplate = selectedTemplateId
-    ? templates.find((template) => template.id === selectedTemplateId) || null
-    : null;
-
   return {
-    templates: templates.map((template) => ({
-      id: template.id,
-      name: template.name,
-      description: template.description,
-      category: template.category,
-      estimatedFields: parseTemplateFields(template.content).length,
-    })),
+    viewer: normalizeViewer(authState),
+    templates: templates.map((template) => normalizeTemplatePayload(template, false)),
     privacyPolicy: settings.PrivacyPolicy || "",
-    selectedTemplate,
-    request: request ? normalizeRequestPayload(request) : null,
-    mode: stringValue(payload.mode) || (request ? "request" : "direct"),
+    selectedTemplate: selectedTemplate ? normalizeTemplatePayload(selectedTemplate, true) : null,
+    request: requestRow ? normalizeRequestPayload(requestRow) : null,
+    mode: stringValue(payload.mode) || (requestRow ? "request" : "direct"),
   };
 }
 
-async function adminLogin(payload: Record<string, unknown>) {
-  if (stringValue(payload.password) !== adminPassword) {
-    throw new Error("관리자 비밀번호가 올바르지 않습니다.");
-  }
-
-  await db.from("admin_sessions").delete().lt("expires_at", new Date().toISOString());
-
-  const expiresAt = new Date(Date.now() + sessionTtlHours * 60 * 60 * 1000).toISOString();
-  const { data, error } = await db
-    .from("admin_sessions")
-    .insert({ actor: "admin", expires_at: expiresAt })
-    .select("token, actor, expires_at")
-    .single();
-
-  if (error) throw error;
-
-  return {
-    success: true,
-    sessionToken: data.token,
-    expiresAt: data.expires_at,
-    message: "관리자 인증이 완료되었습니다.",
-  };
-}
-
-async function adminDashboard(sessionToken: string) {
-  await assertAdminSession(sessionToken);
+async function adminDashboard(request: Request) {
+  const authState = await assertAuthorizedUser(request);
+  await ensureDefaultTemplates(authState);
 
   const [templates, submissionsResult, requestsResult] = await Promise.all([
-    getTemplates(),
-    db.from("submissions").select("*").order("completed_at", { ascending: false }).limit(200),
-    db.from("signature_requests").select("*").order("requested_at", { ascending: false }).limit(200),
+    getOwnedTemplates(authState.userId),
+    adminDb
+      .from("submissions")
+      .select("*")
+      .eq("owner_user_id", authState.userId)
+      .order("completed_at", { ascending: false })
+      .limit(200),
+    adminDb
+      .from("signature_requests")
+      .select("*")
+      .eq("owner_user_id", authState.userId)
+      .order("requested_at", { ascending: false })
+      .limit(200),
   ]);
 
   if (submissionsResult.error) throw submissionsResult.error;
   if (requestsResult.error) throw requestsResult.error;
 
   return {
-    templates: templates.map((template) => ({
-      ...template,
-      estimatedFields: parseTemplateFields(template.content).length,
-    })),
+    currentUser: normalizeViewer(authState),
+    templates: templates.map((template) => normalizeTemplatePayload(template, true)),
     submissions: (submissionsResult.data || []).map(normalizeSubmissionPayload),
     requests: (requestsResult.data || []).map(normalizeRequestPayload),
   };
 }
 
-async function createSignatureRequest(
-  payload: Record<string, unknown>,
-  sessionToken: string,
-  request: Request,
-) {
-  const session = await assertAdminSession(sessionToken);
+async function createSignatureRequest(payload: Record<string, unknown>, request: Request) {
+  const authState = await assertAuthorizedUser(request);
   const templateId = stringValue(payload.templateId);
   const recipientName = stringValue(payload.recipientName);
   const expiresDays = Math.max(1, Number(payload.expiresDays || 7));
   const requestMessage = stringValue(payload.message);
 
   if (!templateId) {
-    throw new Error("템플릿을 선택해 주세요.");
+    throw new Error("양식을 선택해 주세요.");
   }
 
-  const template = await getTemplateById(templateId);
+  const template = await getOwnedTemplateById(templateId, authState.userId);
   if (!template) {
-    throw new Error("선택한 템플릿을 찾을 수 없습니다.");
+    throw new Error("선택한 양식을 찾을 수 없습니다.");
   }
 
   const expiresAt = new Date(Date.now() + expiresDays * 24 * 60 * 60 * 1000).toISOString();
-  const { data, error } = await db
+  const { data, error } = await adminDb
     .from("signature_requests")
     .insert({
+      owner_user_id: authState.userId,
+      owner_email: authState.email,
       template_id: template.id,
       template_name: template.name,
       recipient_name: recipientName,
       expires_at: expiresAt,
       request_message: requestMessage,
-      created_by: session.actor || "admin",
+      created_by: authState.displayName,
     })
     .select("*")
     .single();
@@ -190,9 +218,12 @@ async function createSignatureRequest(
   if (error) throw error;
 
   await appendAuditEvent({
+    owner_user_id: authState.userId,
+    owner_email: authState.email,
     request_token: data.token,
     event_type: "REQUEST_CREATED",
-    actor_name: session.actor || "admin",
+    actor_name: authState.displayName,
+    actor_email: authState.email,
     details: {
       templateId: template.id,
       templateName: template.name,
@@ -227,7 +258,7 @@ async function markRequestViewed(payload: Record<string, unknown>) {
   }
 
   const now = new Date().toISOString();
-  const { data, error } = await db
+  const { data, error } = await adminDb
     .from("signature_requests")
     .update({
       status: normalized.status === "SENT" ? "VIEWED" : normalized.status,
@@ -243,34 +274,33 @@ async function markRequestViewed(payload: Record<string, unknown>) {
 
   if (normalized.status === "SENT") {
     await appendAuditEvent({
+      owner_user_id: normalized.owner_user_id || null,
+      owner_email: stringValue(normalized.owner_email),
       request_token: requestToken,
       event_type: "REQUEST_VIEWED",
-      actor_name: normalized.recipient_name || "수신자",
-      details: { templateId: normalized.template_id, templateName: normalized.template_name },
+      actor_name: stringValue(normalized.recipient_name) || "수신자",
+      actor_email: "",
+      details: {
+        templateId: normalized.template_id,
+        templateName: normalized.template_name,
+      },
     });
   }
 
   return normalizeRequestPayload(data);
 }
 
-async function saveSignature(payload: Record<string, unknown>) {
-  const templateId = stringValue(payload.templateId);
-  const templateName = stringValue(payload.templateName);
+async function saveSignature(payload: Record<string, unknown>, request: Request) {
   const requestToken = stringValue(payload.requestToken);
   const formData = objectValue(payload.formData);
   const signatures = objectValue(payload.signatures);
   const fieldSummary = Array.isArray(payload.fieldSummary) ? payload.fieldSummary : [];
 
-  if (!templateId || !templateName) {
-    throw new Error("문서 정보가 누락되었습니다.");
-  }
+  let activeRequest: Record<string, unknown> | null = null;
+  let template: Record<string, unknown> | null = null;
+  let ownerUserId = "";
+  let ownerEmail = "";
 
-  const template = await getTemplateById(templateId);
-  if (!template) {
-    throw new Error("템플릿을 찾을 수 없습니다.");
-  }
-
-  let activeRequest = null;
   if (requestToken) {
     activeRequest = await getRequestByToken(requestToken);
     if (!activeRequest) throw new Error("서명 요청 정보를 찾을 수 없습니다.");
@@ -278,6 +308,22 @@ async function saveSignature(payload: Record<string, unknown>) {
     activeRequest = await normalizeRequestState(activeRequest);
     if (activeRequest.status === "COMPLETED") throw new Error("이미 완료된 요청입니다.");
     if (activeRequest.status === "EXPIRED") throw new Error("만료된 요청입니다.");
+
+    ownerUserId = stringValue(activeRequest.owner_user_id);
+    ownerEmail = stringValue(activeRequest.owner_email);
+    template = await getTemplateById(stringValue(activeRequest.template_id));
+  } else {
+    const authState = await assertAuthorizedUser(request);
+    ownerUserId = authState.userId;
+    ownerEmail = authState.email;
+    template = await getOwnedTemplateById(stringValue(payload.templateId), authState.userId);
+  }
+
+  if (!template) {
+    throw new Error("양식을 찾을 수 없습니다.");
+  }
+  if (!ownerUserId) {
+    throw new Error("문서 소유자 정보를 확인할 수 없습니다. 새 링크를 다시 생성해 주세요.");
   }
 
   validateSubmission(template, formData, signatures);
@@ -285,12 +331,14 @@ async function saveSignature(payload: Record<string, unknown>) {
   const completedAt = new Date().toISOString();
   const signerName =
     stringValue(payload.signerName) ||
-    (activeRequest ? activeRequest.recipient_name : "") ||
+    stringValue(activeRequest?.recipient_name) ||
     deriveSignerName(formData);
 
-  const { data: submission, error } = await db
+  const { data: submission, error } = await adminDb
     .from("submissions")
     .insert({
+      owner_user_id: ownerUserId,
+      owner_email: ownerEmail,
       request_token: requestToken || null,
       template_id: template.id,
       template_name: template.name,
@@ -312,7 +360,7 @@ async function saveSignature(payload: Record<string, unknown>) {
 
   if (activeRequest) {
     const now = new Date().toISOString();
-    await db
+    await adminDb
       .from("signature_requests")
       .update({
         status: "COMPLETED",
@@ -325,9 +373,12 @@ async function saveSignature(payload: Record<string, unknown>) {
   }
 
   await appendAuditEvent({
+    owner_user_id: ownerUserId,
+    owner_email: ownerEmail,
     request_token: requestToken || null,
     event_type: "DOCUMENT_COMPLETED",
     actor_name: signerName,
+    actor_email: "",
     details: {
       templateId: template.id,
       templateName: template.name,
@@ -346,60 +397,100 @@ async function saveSignature(payload: Record<string, unknown>) {
   };
 }
 
-async function saveTemplateConfig(payload: Record<string, unknown>, sessionToken: string) {
-  const session = await assertAdminSession(sessionToken);
+async function saveTemplateConfig(payload: Record<string, unknown>, request: Request) {
+  const authState = await assertAuthorizedUser(request);
   const name = stringValue(payload.name);
   const content = stringValue(payload.content);
   const requestedId = stringValue(payload.id);
 
   if (!name || !content) {
-    throw new Error("템플릿 이름과 본문 HTML은 필수입니다.");
+    throw new Error("양식명과 본문 HTML은 필수입니다.");
   }
 
   const category = stringValue(payload.category) || "일반 문서";
   const description = stringValue(payload.description);
-  const templateId = requestedId || await generateNextTemplateId();
-  const values = {
-    id: templateId,
-    name,
-    description,
-    category,
-    content,
-    updated_at: new Date().toISOString(),
-  };
+  const updatedAt = new Date().toISOString();
+  let data: Record<string, unknown> | null = null;
 
-  const { data, error } = await db
-    .from("templates")
-    .upsert(values, { onConflict: "id" })
-    .select("*")
-    .single();
+  if (requestedId) {
+    const existing = await getOwnedTemplateById(requestedId, authState.userId);
+    if (!existing) {
+      throw new Error("수정할 양식을 찾을 수 없습니다.");
+    }
 
-  if (error) throw error;
+    const response = await adminDb
+      .from("templates")
+      .update({
+        name,
+        description,
+        category,
+        content,
+        updated_at: updatedAt,
+      })
+      .eq("id", requestedId)
+      .eq("owner_user_id", authState.userId)
+      .select("*")
+      .single();
+
+    if (response.error) throw response.error;
+    data = response.data;
+  } else {
+    const response = await adminDb
+      .from("templates")
+      .insert({
+        id: crypto.randomUUID(),
+        owner_user_id: authState.userId,
+        owner_email: authState.email,
+        name,
+        description,
+        category,
+        content,
+        updated_at: updatedAt,
+      })
+      .select("*")
+      .single();
+
+    if (response.error) throw response.error;
+    data = response.data;
+  }
+
+  if (!data) {
+    throw new Error("양식을 저장하지 못했습니다.");
+  }
 
   await appendAuditEvent({
+    owner_user_id: authState.userId,
+    owner_email: authState.email,
     request_token: null,
     event_type: requestedId ? "TEMPLATE_UPDATED" : "TEMPLATE_CREATED",
-    actor_name: session.actor || "admin",
+    actor_name: authState.displayName,
+    actor_email: authState.email,
     details: {
       templateId: data.id,
       templateName: data.name,
-      fieldCount: parseTemplateFields(data.content).length,
+      fieldCount: parseTemplateFields(stringValue(data.content)).length,
     },
   });
 
   return {
     success: true,
-    template: data,
-    message: requestedId ? "템플릿이 수정되었습니다." : "새 템플릿이 추가되었습니다.",
+    template: normalizeTemplatePayload(data, true),
+    message: requestedId ? "양식이 수정되었습니다." : "새 양식이 추가되었습니다.",
   };
 }
 
-async function getSubmissionDetail(payload: Record<string, unknown>, sessionToken: string) {
-  await assertAdminSession(sessionToken);
+async function getSubmissionDetail(payload: Record<string, unknown>, request: Request) {
+  const authState = await assertAuthorizedUser(request);
   const submissionId = stringValue(payload.submissionId);
   if (!submissionId) throw new Error("제출 문서 ID가 없습니다.");
 
-  const { data, error } = await db.from("submissions").select("*").eq("id", submissionId).single();
+  const { data, error } = await adminDb
+    .from("submissions")
+    .select("*")
+    .eq("id", submissionId)
+    .eq("owner_user_id", authState.userId)
+    .single();
+
   if (error || !data) throw new Error("제출 문서를 찾을 수 없습니다.");
 
   const template = {
@@ -421,7 +512,7 @@ async function verifySubmissionByCode(payload: Record<string, unknown>) {
   const verificationCode = stringValue(payload.verificationCode).toUpperCase();
   if (!verificationCode) throw new Error("검증번호를 입력해 주세요.");
 
-  const { data, error } = await db
+  const { data, error } = await adminDb
     .from("submissions")
     .select("*")
     .eq("verification_code", verificationCode)
@@ -445,46 +536,138 @@ async function verifySubmissionByCode(payload: Record<string, unknown>) {
   };
 }
 
-async function assertAdminSession(sessionToken: string) {
-  if (!sessionToken) throw new Error("관리자 인증이 필요합니다.");
+async function getAuthState(request: Request): Promise<AuthState> {
+  const accessToken = extractAccessToken(request);
+  if (!accessToken) {
+    return {
+      loggedIn: false,
+      authorized: false,
+      userId: "",
+      email: "",
+      displayName: "",
+      rawUser: null,
+      accessToken: "",
+    };
+  }
 
-  const { data, error } = await db
-    .from("admin_sessions")
-    .select("token, actor, expires_at")
-    .eq("token", sessionToken)
-    .gt("expires_at", new Date().toISOString())
+  const { data, error } = await adminDb.auth.getUser(accessToken);
+  if (error || !data.user) {
+    throw new Error("로그인 세션이 유효하지 않습니다. 다시 로그인해 주세요.");
+  }
+
+  const email = stringValue(data.user.email).toLowerCase();
+  if (!email) {
+    throw new Error("이메일 정보를 읽을 수 없는 계정입니다.");
+  }
+
+  const { data: allowedUser, error: allowedError } = await adminDb
+    .from("admin_users")
+    .select("email, display_name, is_active")
+    .ilike("email", email)
+    .eq("is_active", true)
     .maybeSingle();
 
-  if (error) throw error;
-  if (!data) throw new Error("관리자 인증이 만료되었습니다. 다시 로그인해 주세요.");
+  if (allowedError) throw allowedError;
 
-  return data;
+  return {
+    loggedIn: true,
+    authorized: Boolean(allowedUser),
+    userId: data.user.id,
+    email,
+    displayName:
+      stringValue(allowedUser?.display_name) ||
+      stringValue(data.user.user_metadata?.full_name) ||
+      stringValue(data.user.user_metadata?.name) ||
+      email,
+    rawUser: data.user,
+    accessToken,
+  };
 }
 
-async function getTemplates() {
-  const { data, error } = await db.from("templates").select("*").order("id", { ascending: true });
+async function assertAuthorizedUser(request: Request) {
+  const authState = await getAuthState(request);
+  if (!authState.loggedIn) {
+    throw new Error("관리자 작업은 로그인 후 사용할 수 있습니다.");
+  }
+  if (!authState.authorized) {
+    throw new Error("허용된 사용자만 관리자 화면에 접근할 수 있습니다. admin_users 테이블에 이메일을 먼저 등록해 주세요.");
+  }
+  return authState;
+}
+
+async function ensureDefaultTemplates(authState: AuthState) {
+  const { count, error } = await adminDb
+    .from("templates")
+    .select("id", { count: "exact", head: true })
+    .eq("owner_user_id", authState.userId);
+
+  if (error) throw error;
+  if ((count || 0) > 0) return;
+
+  const now = new Date().toISOString();
+  const rows = defaultTemplates.map((template) => ({
+    id: crypto.randomUUID(),
+    owner_user_id: authState.userId,
+    owner_email: authState.email,
+    name: template.name,
+    description: template.description,
+    category: template.category,
+    content: template.content,
+    created_at: now,
+    updated_at: now,
+  }));
+
+  const { error: insertError } = await adminDb.from("templates").insert(rows);
+  if (insertError) throw insertError;
+}
+
+async function getOwnedTemplates(userId: string) {
+  const { data, error } = await adminDb
+    .from("templates")
+    .select("*")
+    .eq("owner_user_id", userId)
+    .order("created_at", { ascending: true });
+
   if (error) throw error;
   return data || [];
 }
 
+async function getOwnedTemplateById(templateId: string, userId: string) {
+  const { data, error } = await adminDb
+    .from("templates")
+    .select("*")
+    .eq("id", templateId)
+    .eq("owner_user_id", userId)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
 async function getTemplateById(templateId: string) {
-  const { data, error } = await db.from("templates").select("*").eq("id", templateId).maybeSingle();
+  const { data, error } = await adminDb
+    .from("templates")
+    .select("*")
+    .eq("id", templateId)
+    .maybeSingle();
+
   if (error) throw error;
   return data;
 }
 
 async function getSettings() {
-  const { data, error } = await db.from("app_settings").select("key, value");
+  const { data, error } = await adminDb.from("app_settings").select("key, value");
   if (error) throw error;
   return Object.fromEntries((data || []).map((row) => [row.key, row.value]));
 }
 
 async function getRequestByToken(requestToken: string) {
-  const { data, error } = await db
+  const { data, error } = await adminDb
     .from("signature_requests")
     .select("*")
     .eq("token", requestToken)
     .maybeSingle();
+
   if (error) throw error;
   return data;
 }
@@ -498,12 +681,13 @@ async function normalizeRequestState(request: Record<string, unknown>) {
     status !== "EXPIRED" &&
     expiresAt.getTime() < Date.now()
   ) {
-    const { data, error } = await db
+    const { data, error } = await adminDb
       .from("signature_requests")
       .update({ status: "EXPIRED" })
       .eq("token", stringValue(request.token))
       .select("*")
       .single();
+
     if (error) throw error;
     return data;
   }
@@ -512,23 +696,14 @@ async function normalizeRequestState(request: Record<string, unknown>) {
 }
 
 async function appendAuditEvent(payload: Record<string, unknown>) {
-  const { error } = await db.from("audit_logs").insert(payload);
+  const { error } = await adminDb.from("audit_logs").insert(payload);
   if (error) throw error;
-}
-
-async function generateNextTemplateId() {
-  const templates = await getTemplates();
-  const max = templates.reduce((current, template) => {
-    const match = String(template.id || "").match(/^T(\d+)$/);
-    return match ? Math.max(current, Number(match[1])) : current;
-  }, 0);
-  return `T${String(max + 1).padStart(3, "0")}`;
 }
 
 async function assignVerificationCode(submissionId: string) {
   for (let i = 0; i < 5; i += 1) {
     const code = `ES-${crypto.randomUUID().split("-")[0].toUpperCase()}`;
-    const { error } = await db
+    const { error } = await adminDb
       .from("submissions")
       .update({ verification_code: code })
       .eq("id", submissionId);
@@ -553,7 +728,7 @@ function validateSubmission(
   });
 
   if (missing.length) {
-    throw new Error(`필수 항목이 누락되었습니다: ${missing.map((field) => field.label).join(", ")}`);
+    throw new Error(`필수 항목이 비어 있습니다: ${missing.map((field) => field.label).join(", ")}`);
   }
 }
 
@@ -586,12 +761,12 @@ function buildSubmissionPreviewHtml(template: Record<string, unknown>, submissio
       const signature = stringValue(signatures[field.name]);
       return signature
         ? `<span class="submitted-signature"><img src="${escapeHtml(signature)}" alt="${escapeHtml(field.label)} 서명"></span>`
-        : `<span class="submitted-empty">서명 없음</span>`;
+        : '<span class="submitted-empty">서명 없음</span>';
     }
     if (field.type === "check") {
       return formData[field.name] === true
-        ? `<span class="submitted-check">확인함</span>`
-        : `<span class="submitted-empty">미확인</span>`;
+        ? '<span class="submitted-check">확인됨</span>'
+        : '<span class="submitted-empty">미확인</span>';
     }
     return `<span class="submitted-value">${escapeHtml(stringValue(formData[field.name])) || "-"}</span>`;
   });
@@ -643,6 +818,32 @@ function parseFieldSpec(type: FieldType, rawSpec: string): TemplateField {
   };
 }
 
+function normalizeViewer(authState: AuthState) {
+  return {
+    loggedIn: authState.loggedIn,
+    authorized: authState.authorized,
+    userId: authState.userId,
+    email: authState.email,
+    displayName: authState.displayName,
+  };
+}
+
+function normalizeTemplatePayload(row: Record<string, unknown>, includeContent: boolean) {
+  const payload: Record<string, unknown> = {
+    id: row.id,
+    name: row.name,
+    description: row.description || "",
+    category: row.category || "",
+    estimatedFields: parseTemplateFields(stringValue(row.content)).length,
+  };
+
+  if (includeContent) {
+    payload.content = row.content || "";
+  }
+
+  return payload;
+}
+
 function normalizeRequestPayload(row: Record<string, unknown>) {
   return {
     requestToken: row.token,
@@ -657,6 +858,7 @@ function normalizeRequestPayload(row: Record<string, unknown>) {
     lastAccessedAt: row.last_accessed_at,
     accessCount: row.access_count || 0,
     message: row.request_message || "",
+    createdBy: row.created_by || "",
   };
 }
 
@@ -702,6 +904,14 @@ function formatDateTime(value: string) {
     timeStyle: "short",
     timeZone: "Asia/Seoul",
   }).format(date);
+}
+
+function extractAccessToken(request: Request) {
+  const authHeader = request.headers.get("authorization") || "";
+  const apikey = request.headers.get("apikey") || "";
+  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+  if (!token || token === apikey) return "";
+  return token;
 }
 
 function objectValue(value: unknown): Record<string, unknown> {

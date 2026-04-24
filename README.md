@@ -1,12 +1,21 @@
 # 전자서명 Supabase 버전
 
-기존 `전자서명` Google Apps Script 코드는 그대로 두고, GitHub Pages와 Supabase로 배포할 수 있게 만든 버전입니다.
+기존 전자서명 앱을 `GitHub Pages + Supabase`로 운영하는 버전입니다.
 
-메일 발송 기능은 없습니다. 관리자가 요청 링크를 생성하고, 그 링크를 문자, 카카오톡, 메신저, 이메일 등에 직접 전달하는 방식입니다.
+이번 구조에서는 관리자 비밀번호 대신 `Supabase OAuth 로그인`을 사용합니다.  
+허용된 이메일로 로그인한 사용자만 관리자 화면에 들어갈 수 있고, 각 사용자가 만든 데이터는 해당 사용자만 읽을 수 있습니다.
 
-## 현재 저장소 구조
+## 핵심 변경점
 
-GitHub Pages의 `Deploy from a branch` + `/root` 방식으로 바로 배포할 수 있도록 `index.html`을 저장소 루트에 둡니다.
+- 로그인: Google OAuth
+- 관리자 허용 기준: `public.admin_users` 테이블의 이메일
+- 데이터 격리 기준: `owner_user_id`
+- 격리 대상: 템플릿, 요청 링크, 제출 문서, 감사 로그
+- 공개 접근 허용: 서명 링크 접속, 문서 검증번호 조회
+
+즉, `a@example.com`이 만든 양식/요청/제출 문서는 `a@example.com` 본인만 관리자 화면에서 볼 수 있습니다.
+
+## 폴더 구조
 
 ```text
 esign/
@@ -19,6 +28,7 @@ esign/
     config.toml
     migrations/
       001_initial_schema.sql
+      002_oauth_owner_scope.sql
     functions/
       signature-api/
         index.ts
@@ -26,229 +36,362 @@ esign/
   README.md
 ```
 
-## 전체 배포 순서
+## 처음 설치하는 경우
 
-이 문서는 Supabase CLI 없이 Supabase 웹페이지와 GitHub 웹페이지에서 설정하는 방식입니다.
+처음 설치라면 아래 순서대로 진행하면 됩니다.
 
 1. Supabase 프로젝트 생성
-2. Supabase SQL Editor에서 DB 스키마 실행
-3. Supabase Dashboard에서 Edge Function 생성
-4. Edge Function Secrets 설정
-5. Supabase API 주소와 anon key 확인
-6. `src/config.js` 수정
-7. GitHub 저장소에 파일 업로드 또는 푸시
-8. GitHub Pages를 `/root`로 설정
-9. 관리자 로그인 후 요청 링크 생성 테스트
+2. DB 스키마 적용
+3. Google OAuth 설정
+4. 허용 사용자 이메일 등록
+5. Edge Function 생성
+6. Edge Function Secrets 등록
+7. `src/config.js` 수정
+8. GitHub Pages 배포
+9. 로그인 테스트
 
-## 1. Supabase 프로젝트 생성
+아래에서 하나씩 설명합니다.
 
-1. https://supabase.com 접속
-2. 로그인
-3. `New project` 클릭
-4. 프로젝트 이름 입력
-5. Database Password 설정
-6. Region 선택
-7. 프로젝트 생성 완료까지 대기
+## 1. Supabase 프로젝트 만들기
 
-프로젝트가 생성되면 아래 메뉴를 사용합니다.
+1. https://supabase.com 에 로그인합니다.
+2. `New project`를 클릭합니다.
+3. 프로젝트 이름을 입력합니다.
+4. 데이터베이스 비밀번호를 설정합니다.
+5. Region을 선택합니다.
+6. 프로젝트 생성이 끝날 때까지 기다립니다.
 
-- `SQL Editor`: DB 테이블 생성
-- `Edge Functions`: 서버 API 생성
-- `Project Settings > API`: API URL과 anon key 확인
-- `Project Settings > Edge Functions`: Function Secrets 설정
+프로젝트가 만들어지면 아래 메뉴를 주로 사용합니다.
+
+- `SQL Editor`
+- `Authentication`
+- `Edge Functions`
+- `Project Settings > Data API` 또는 `Project Settings > API`
+- `Project Settings > Edge Functions`
 
 ## 2. DB 스키마 적용
 
-1. Supabase Dashboard 왼쪽 메뉴에서 `SQL Editor` 클릭
-2. `New query` 클릭
-3. [supabase/migrations/001_initial_schema.sql](./supabase/migrations/001_initial_schema.sql) 파일 내용 전체 복사
-4. SQL Editor에 붙여넣기
-5. `Run` 클릭
+### 새로 설치하는 경우
 
-실행 후 `Table Editor`에서 아래 테이블이 생성되었는지 확인합니다.
+1. Supabase에서 `SQL Editor`를 엽니다.
+2. `New query`를 클릭합니다.
+3. [supabase/migrations/001_initial_schema.sql](./supabase/migrations/001_initial_schema.sql) 파일 내용을 전체 복사합니다.
+4. SQL Editor에 붙여넣고 `Run`을 누릅니다.
+
+실행 후 아래 테이블이 생기면 정상입니다.
 
 - `app_settings`
+- `admin_users`
 - `templates`
 - `signature_requests`
 - `submissions`
 - `audit_logs`
-- `admin_sessions`
 
-기본 양식도 `templates` 테이블에 자동으로 들어갑니다.
+### 예전 공개 버전에서 업그레이드하는 경우
 
-## 3. Edge Function 생성
+예전에 이 프로젝트의 비밀번호 로그인 버전을 이미 설치했다면:
 
-1. Supabase Dashboard 왼쪽 메뉴에서 `Edge Functions` 클릭
-2. `Create a new function` 또는 `New function` 클릭
-3. 함수 이름을 `signature-api`로 입력
-4. [supabase/functions/signature-api/index.ts](./supabase/functions/signature-api/index.ts) 파일 내용 전체 복사
-5. Supabase Edge Function 편집기에 붙여넣기
-6. 저장 또는 배포
+1. 먼저 기존 데이터를 백업합니다.
+2. `001_initial_schema.sql`을 다시 실행하지 말고,
+3. [supabase/migrations/002_oauth_owner_scope.sql](./supabase/migrations/002_oauth_owner_scope.sql) 파일만 실행합니다.
 
-Function URL 형식:
+주의:
+
+- 예전 공개 버전에서 만든 데이터에는 소유자 정보가 없을 수 있습니다.
+- 그런 데이터는 새 구조에서 자동으로 사용자에게 연결되지 않습니다.
+- 가장 안전한 방법은 `새 Supabase 프로젝트를 만드는 것`입니다.
+
+## 3. Google OAuth 설정
+
+이 앱은 `Google 로그인`을 기준으로 동작합니다.
+
+### 3-1. Supabase URL 설정
+
+1. Supabase에서 `Authentication`으로 이동합니다.
+2. `URL Configuration`을 엽니다.
+3. `Site URL`에 실제 사이트 주소를 넣습니다.
+
+예시:
+
+```text
+https://kijung4290.github.io/esign
+```
+
+4. `Redirect URLs`에도 같은 주소를 추가합니다.
+5. 로컬 테스트를 할 계획이면 아래도 추가합니다.
+
+```text
+http://localhost:5500/**
+http://127.0.0.1:5500/**
+```
+
+참고:
+
+- Supabase 공식 문서: https://supabase.com/docs/guides/auth/redirect-urls
+
+### 3-2. Google Cloud에서 OAuth Client 만들기
+
+1. https://console.cloud.google.com 에 로그인합니다.
+2. 새 프로젝트를 만들거나 기존 프로젝트를 선택합니다.
+3. `APIs & Services > OAuth consent screen`으로 이동합니다.
+4. 앱 이름, 사용자 지원 이메일 등을 입력하고 저장합니다.
+5. `APIs & Services > Credentials`로 이동합니다.
+6. `Create Credentials > OAuth client ID`를 클릭합니다.
+7. Application type은 `Web application`을 선택합니다.
+8. 이름을 입력합니다.
+9. `Authorized redirect URIs`에 Supabase가 안내하는 Google 콜백 URL을 넣습니다.
+
+이 URL은 Supabase에서 아래 위치에서 확인할 수 있습니다.
+
+1. `Authentication > Sign In / Providers > Google`
+2. Google provider 설정 화면에 표시되는 Callback URL 복사
+
+보통 형태는 아래와 같습니다.
+
+```text
+https://YOUR_PROJECT_REF.supabase.co/auth/v1/callback
+```
+
+10. 저장 후 `Client ID`와 `Client Secret`을 복사합니다.
+
+참고:
+
+- Supabase 공식 문서: https://supabase.com/docs/guides/auth/social-login/auth-google
+
+### 3-3. Supabase에 Google Provider 연결
+
+1. Supabase에서 `Authentication > Sign In / Providers`로 이동합니다.
+2. `Google`을 켭니다.
+3. 방금 만든 `Client ID`, `Client Secret`을 입력합니다.
+4. 저장합니다.
+
+## 4. 허용 사용자 이메일 등록
+
+이 단계가 중요합니다.
+
+Google 로그인을 켜기만 하면 끝이 아닙니다.  
+`admin_users` 테이블에 등록된 이메일만 관리자 화면에 들어갈 수 있습니다.
+
+Supabase `SQL Editor`에서 아래처럼 실행하세요.
+
+```sql
+insert into public.admin_users (email, display_name)
+values
+  ('your-email@gmail.com', '관리자')
+on conflict (email) do update
+set
+  display_name = excluded.display_name,
+  is_active = true,
+  updated_at = now();
+```
+
+여러 명을 허용하려면 여러 줄로 넣으면 됩니다.
+
+```sql
+insert into public.admin_users (email, display_name)
+values
+  ('a@example.com', '담당자 A'),
+  ('b@example.com', '담당자 B')
+on conflict (email) do update
+set
+  display_name = excluded.display_name,
+  is_active = true,
+  updated_at = now();
+```
+
+접근을 막고 싶으면:
+
+```sql
+update public.admin_users
+set is_active = false, updated_at = now()
+where email = 'a@example.com';
+```
+
+## 5. Edge Function 만들기
+
+1. Supabase에서 `Edge Functions`로 이동합니다.
+2. `Create a new function`을 클릭합니다.
+3. 함수 이름을 `signature-api`로 만듭니다.
+4. [supabase/functions/signature-api/index.ts](./supabase/functions/signature-api/index.ts) 파일 내용을 전체 복사합니다.
+5. Supabase 편집기에 붙여넣고 배포합니다.
+
+배포 후 Function URL은 보통 아래 형태입니다.
 
 ```text
 https://YOUR_PROJECT_REF.supabase.co/functions/v1/signature-api
 ```
 
-## 4. Edge Function Secrets 설정
+## 6. Edge Function Secrets 등록
 
-Supabase Dashboard에서 Secret을 설정합니다.
+1. Supabase에서 `Project Settings > Edge Functions`로 이동합니다.
+2. `Secrets` 또는 `Environment variables`에서 아래 값을 추가합니다.
 
-1. `Project Settings` 클릭
-2. `Edge Functions` 메뉴 클릭
-3. `Secrets` 또는 `Environment variables` 영역으로 이동
-4. 아래 값을 추가
-
-관리자 비밀번호:
+### 필수 값
 
 ```text
-ADMIN_PASSWORD=원하는관리자비밀번호
-```
-
-GitHub Pages 주소:
-
-```text
+SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
 PUBLIC_SITE_URL=https://kijung4290.github.io/esign
 ```
 
-GitHub Pages 주소가 아직 확정되지 않았다면 임시로 넣고, Pages 주소가 나온 뒤 다시 수정합니다.
+설명:
 
-## 5. Supabase API URL과 anon key 확인
+- `SUPABASE_URL`: 프로젝트 URL
+- `SUPABASE_SERVICE_ROLE_KEY`: service role key
+- `PUBLIC_SITE_URL`: 실제 사용자 사이트 주소
 
-1. Supabase Dashboard 왼쪽 아래 `Project Settings` 클릭
-2. `API` 클릭
-3. `Project URL` 확인
-4. `Project API keys` 또는 `API keys` 영역에서 `anon public key` 복사
+중요:
 
-주의: `service_role` 키는 절대 GitHub에 올리면 안 됩니다. 브라우저에는 `anon public key`만 넣습니다.
+- `service_role` 키는 브라우저에 넣지 않습니다.
+- `service_role` 키는 Edge Function Secret에만 넣습니다.
 
-## 6. 프론트엔드 설정
+## 7. API URL / anon key 확인
 
-[src/config.js](./src/config.js)를 엽니다.
+1. Supabase에서 `Project Settings > Data API` 또는 `Project Settings > API`로 이동합니다.
+2. 아래 값을 복사합니다.
 
-아래 두 값을 본인 Supabase 프로젝트 값으로 수정합니다.
+- `Project URL`
+- `anon public key`
+
+## 8. src/config.js 수정
+
+[src/config.js](./src/config.js)를 열어서 아래 값을 본인 프로젝트 값으로 바꿉니다.
 
 ```js
 window.ESIGN_CONFIG = {
+  SUPABASE_URL: "https://YOUR_PROJECT_REF.supabase.co",
   API_URL: "https://YOUR_PROJECT_REF.supabase.co/functions/v1/signature-api",
-  ANON_KEY: "YOUR_SUPABASE_ANON_PUBLIC_KEY"
+  SUPABASE_ANON_KEY: "YOUR_SUPABASE_ANON_PUBLIC_KEY",
+  ANON_KEY: "YOUR_SUPABASE_ANON_PUBLIC_KEY",
+  OAUTH_PROVIDER: "google"
 };
 ```
 
-## 7. GitHub 저장소에 업로드
+설명:
 
-저장소 루트에 아래 파일 구조가 그대로 있어야 합니다.
+- `SUPABASE_URL`: Supabase Auth 클라이언트용
+- `API_URL`: Edge Function 주소
+- `SUPABASE_ANON_KEY`: 브라우저에서 써도 되는 공개 키
+- `OAUTH_PROVIDER`: 현재는 `google`
 
-```text
-index.html
-src/app.js
-src/config.js
-src/styles.css
-supabase/migrations/001_initial_schema.sql
-supabase/functions/signature-api/index.ts
-README.md
-```
+## 9. GitHub Pages 배포
 
-현재 저장소는 이 구조로 맞춰져 있으므로 그대로 푸시하면 됩니다.
+이 저장소는 루트에 `index.html`이 있어서 GitHub Pages에서 바로 배포할 수 있습니다.
 
-## 8. GitHub Pages 설정
+1. GitHub 저장소 페이지로 갑니다.
+2. `Settings > Pages`로 이동합니다.
+3. `Source`를 `Deploy from a branch`로 설정합니다.
+4. Branch는 `main`
+5. Folder는 `/root`
+6. 저장합니다.
 
-GitHub 저장소에서 다음 순서로 설정합니다.
-
-1. 저장소 페이지로 이동
-2. `Settings` 클릭
-3. 왼쪽 메뉴에서 `Pages` 클릭
-4. `Build and deployment` 영역으로 이동
-5. `Source`를 `Deploy from a branch`로 선택
-6. `Branch`를 `main`으로 선택
-7. 폴더는 `/root` 선택
-8. `Save` 클릭
-
-잠시 후 아래 형식의 GitHub Pages 주소가 생성됩니다.
+배포 주소 예시:
 
 ```text
 https://kijung4290.github.io/esign/
 ```
 
-## 9. PUBLIC_SITE_URL 다시 확인
-
-GitHub Pages 주소가 확정되면 Supabase Secret의 `PUBLIC_SITE_URL` 값을 실제 주소와 맞춥니다.
+`PUBLIC_SITE_URL`에는 보통 끝의 `/` 없이 아래처럼 넣는 편이 안전합니다.
 
 ```text
-PUBLIC_SITE_URL=https://kijung4290.github.io/esign
+https://kijung4290.github.io/esign
 ```
 
-이 값은 관리자 화면에서 요청 링크를 생성할 때 사용됩니다.
+## 10. 첫 로그인 테스트
 
-## 10. 배포 테스트
+1. GitHub Pages 주소로 접속합니다.
+2. 상단 `관리자`를 클릭합니다.
+3. `Google로 로그인` 버튼을 누릅니다.
+4. `admin_users`에 넣어 둔 이메일 계정으로 로그인합니다.
+5. 관리자 화면이 열리면 정상입니다.
 
-1. GitHub Pages 주소 접속
-2. 우측 상단 `관리자` 클릭
-3. `ADMIN_PASSWORD`로 설정한 비밀번호 입력
-4. `요청 링크` 탭에서 양식 선택
-5. 수신자 이름과 만료일 입력
-6. `요청 링크 생성` 클릭
-7. 생성된 링크 복사
-8. 새 브라우저 탭에서 링크 접속
-9. 문서 작성 및 서명 제출
-10. 관리자 화면의 `제출 문서`에서 제출 내역 확인
-11. 검증번호로 `검증` 화면에서 이력 확인
+정상 동작하면:
 
-## 양식 태그
+- 첫 로그인 시 기본 양식이 자동 생성됩니다.
+- 요청 링크를 만들 수 있습니다.
+- 내가 만든 요청/제출 문서만 보입니다.
 
-템플릿 본문 HTML 안에서 아래 태그를 사용할 수 있습니다.
+## 데이터가 어떻게 분리되는가
 
-```text
-[[text:성명|required|placeholder=성명을 입력하세요]]
-[[date:작성일|required]]
-[[check:동의|required|label=내용을 확인했습니다.]]
-[[sign:본인서명|required|role=본인]]
+각 주요 데이터에는 아래 값이 저장됩니다.
+
+- `owner_user_id`
+- `owner_email`
+
+관리자 화면 조회 시 현재 로그인 사용자와 `owner_user_id`가 같은 데이터만 불러옵니다.
+
+즉:
+
+- A 사용자가 만든 템플릿은 A만 조회 가능
+- A가 만든 요청 링크로 제출된 문서도 A만 조회 가능
+- B 사용자는 같은 시스템을 써도 A 데이터를 읽을 수 없음
+
+## 공개 접근이 가능한 것
+
+아래 두 가지는 로그인 없이 동작합니다.
+
+1. 요청 링크로 들어온 서명 페이지
+2. 검증번호로 문서 이력 확인
+
+대신 관리자 화면의 데이터 목록은 로그인 사용자 소유분만 보입니다.
+
+## 자주 하는 실수
+
+### 1. Google 로그인 후 다시 홈으로만 돌아오고 관리자 화면이 안 보임
+
+가장 흔한 원인:
+
+- `admin_users`에 이메일이 없음
+- `URL Configuration`의 `Site URL` / `Redirect URLs`가 실제 배포 주소와 다름
+
+먼저 아래를 확인하세요.
+
+```sql
+select * from public.admin_users;
 ```
 
-옵션:
+### 2. Google 로그인 후 `localhost`로 되돌아감
 
-- `required`: 필수 항목
-- `optional`: 선택 항목
-- `placeholder=...`: 입력 안내 문구
-- `label=...`: 체크박스 표시 문구
-- `role=...`: 서명 역할명
-- `size=medium|wide|full`: 입력칸 크기
+원인:
+
+- Supabase `URL Configuration`에 실제 배포 주소가 빠져 있음
+
+공식 참고:
+
+- https://supabase.com/docs/guides/auth/redirect-urls
+
+### 3. Google OAuth 설정은 했는데 로그인 버튼이 오류남
+
+확인할 것:
+
+- Google Cloud의 OAuth Client가 `Web application`인지
+- Google의 `Authorized redirect URI`에 Supabase callback URL이 정확히 들어갔는지
+- Supabase Google provider에 같은 Client ID / Secret이 들어갔는지
+
+### 4. 관리자 화면은 열리는데 양식이 안 보임
+
+첫 로그인 직후에는 기본 양식이 자동 생성됩니다.  
+그래도 안 보이면 Edge Function이 최신 코드인지 다시 배포해 보세요.
+
+### 5. 기존 공개 버전 데이터가 안 보임
+
+예전 비밀번호 로그인 버전 데이터는 소유자 정보가 없을 수 있습니다.  
+이 버전은 `owner_user_id` 기준으로 데이터가 분리되므로, 기존 공개 데이터는 자동 연결되지 않을 수 있습니다.
+
+가장 쉬운 방법:
+
+- 새 Supabase 프로젝트를 만들어 001 스키마부터 다시 세팅
 
 ## 보안 메모
 
-- 프론트엔드는 Supabase DB에 직접 접근하지 않고 Edge Function만 호출합니다.
 - 브라우저에는 `anon public key`만 넣습니다.
-- `service_role` 키와 DB 비밀번호는 절대 GitHub에 올리지 않습니다.
-- DB 테이블은 RLS가 켜져 있으며 공개 정책을 만들지 않았습니다.
-- 관리자 비밀번호는 GitHub 코드에 넣지 말고 Supabase Secret `ADMIN_PASSWORD`로만 설정합니다.
-- 서명과 개인정보가 저장되므로 Supabase 계정 보안, 관리자 비밀번호 관리, 접근 권한 관리를 신중히 해야 합니다.
+- `service_role` 키는 Edge Function Secret에만 넣습니다.
+- 관리자 권한은 `admin_users` 이메일 허용 목록으로 제어합니다.
+- DB 스키마에는 RLS 정책이 포함되어 있습니다.
+- 관리자용 데이터는 `owner_user_id` 기준으로 분리됩니다.
 
-## 문제 해결
+## 참고 링크
 
-### `index.html`이 보이지 않는 경우
-
-GitHub Pages 설정이 아래와 같은지 확인합니다.
-
-- Source: `Deploy from a branch`
-- Branch: `main`
-- Folder: `/root`
-
-그리고 저장소 루트에 `index.html`이 있어야 합니다.
-
-### API 설정 오류가 뜨는 경우
-
-[src/config.js](./src/config.js)의 `API_URL`과 `ANON_KEY`를 확인합니다.
-
-### 관리자 로그인이 안 되는 경우
-
-Supabase Edge Function Secret의 `ADMIN_PASSWORD`가 맞는지 확인합니다.
-
-### 요청 링크가 잘못된 주소로 생성되는 경우
-
-Supabase Edge Function Secret의 `PUBLIC_SITE_URL`을 실제 GitHub Pages 주소로 수정합니다.
-
-### DB 테이블이 없다는 오류가 나는 경우
-
-Supabase SQL Editor에서 [supabase/migrations/001_initial_schema.sql](./supabase/migrations/001_initial_schema.sql) 내용을 다시 실행합니다.
-
+- Supabase Auth 개요: https://supabase.com/docs/guides/auth
+- Redirect URLs 설정: https://supabase.com/docs/guides/auth/redirect-urls
+- Google 로그인 설정: https://supabase.com/docs/guides/auth/social-login/auth-google

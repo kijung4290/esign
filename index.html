@@ -6,6 +6,7 @@
   <title>전자서명</title>
   <link rel="stylesheet" href="./src/styles.css">
   <script src="./src/config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
   <header class="topbar">
@@ -107,11 +108,12 @@
       <div class="admin-layout">
         <form id="admin-login" class="admin-login panel">
           <p class="eyebrow">Admin</p>
-          <h2>관리자 로그인</h2>
-          <label for="admin-password">비밀번호</label>
-          <div class="input-row">
-            <input id="admin-password" type="password" autocomplete="current-password">
-            <button class="btn primary" type="submit">로그인</button>
+          <h2 id="admin-auth-title">관리자 로그인</h2>
+          <p id="admin-auth-copy" class="muted">허용된 Google 계정으로 로그인하면 본인 데이터만 볼 수 있습니다.</p>
+          <p id="admin-auth-email" class="auth-email hidden"></p>
+          <div class="auth-actions">
+            <button id="admin-login-submit" class="btn primary" type="submit">Google로 로그인</button>
+            <button id="admin-logout-gate" class="btn secondary hidden" type="button">로그아웃</button>
           </div>
         </form>
 
@@ -121,7 +123,13 @@
               <p class="eyebrow">Dashboard</p>
               <h2>관리자</h2>
             </div>
-            <button id="admin-logout" class="btn secondary" type="button">로그아웃</button>
+            <div class="admin-head-actions">
+              <div class="admin-user">
+                <strong id="admin-user-name">관리자</strong>
+                <span id="admin-user-email"></span>
+              </div>
+              <button id="admin-logout" class="btn secondary" type="button">로그아웃</button>
+            </div>
           </div>
           <div class="tabs">
             <button class="tab active" type="button" data-tab="templates">양식 편집</button>

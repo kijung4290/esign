@@ -567,6 +567,47 @@ textarea:focus {
   align-items: center;
 }
 
+.admin-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.admin-user {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.admin-user strong {
+  font-size: 14px;
+}
+
+.admin-user span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auth-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.auth-email {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-alt);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 14px;
+}
+
 .admin-section-head {
   display: flex;
   justify-content: space-between;

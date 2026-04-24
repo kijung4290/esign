@@ -1,5 +1,8 @@
 (function () {
   const config = window.ESIGN_CONFIG || {};
+  const supabaseClientFactory = window.supabase && typeof window.supabase.createClient === "function"
+    ? window.supabase.createClient
+    : null;
   const FIELD_TYPE_META = {
     text: { icon: "T", label: "입력칸" },
     date: { icon: "D", label: "날짜" },
@@ -8,11 +11,14 @@
   };
 
   const state = {
+    supabase: null,
+    authSession: null,
+    authUser: null,
+    viewer: { loggedIn: false, authorized: false, email: "", displayName: "" },
     templates: [],
     selectedTemplate: null,
     request: null,
     fields: [],
-    adminSessionToken: localStorage.getItem("esign_admin_session") || "",
     adminData: null,
     currentSignatureFieldId: "",
     activeSignatureTab: "draw",
@@ -35,10 +41,22 @@
   async function init() {
     bindGlobalEvents();
     initSignaturePad();
+    initSupabase();
+
+    const authHashError = readAuthHashError();
+    const session = await refreshAuthSession();
+    if (session?.access_token && location.hash.includes("access_token")) {
+      history.replaceState({}, "", currentSiteUrl() + location.search);
+    }
+    if (authHashError) {
+      history.replaceState({}, "", currentSiteUrl() + location.search);
+      showError(new Error(authHashError));
+    }
 
     const params = new URLSearchParams(location.search);
     const requestToken = params.get("req") || "";
     const verificationCode = params.get("verify") || "";
+    const adminIntent = params.get("admin") === "1";
 
     await loadBootstrap({ requestToken });
 
@@ -52,6 +70,12 @@
       showScreen("verify-screen");
       $("#verify-code").value = verificationCode;
       await runVerification(verificationCode);
+      return;
+    }
+
+    if (adminIntent) {
+      await openAdmin();
+      history.replaceState({}, "", currentSiteUrl());
       return;
     }
 
@@ -87,6 +111,7 @@
 
     $("#submit-signature").addEventListener("click", submitSignature);
     $("#admin-login").addEventListener("submit", adminLogin);
+    $("#admin-logout-gate").addEventListener("click", adminLogout);
     $("#admin-logout").addEventListener("click", adminLogout);
     $("#request-form").addEventListener("submit", createRequestLink);
     $("#copy-generated-link").addEventListener("click", copyGeneratedLink);
@@ -145,6 +170,7 @@
     showLoading(true);
     try {
       const result = await api("bootstrap", extraPayload || {});
+      state.viewer = result.viewer || { loggedIn: false, authorized: false, email: "", displayName: "" };
       state.templates = result.templates || [];
       state.selectedTemplate = result.selectedTemplate || null;
       state.request = result.request || null;
@@ -161,7 +187,13 @@
     grid.innerHTML = "";
 
     if (!state.templates.length) {
-      grid.innerHTML = '<div class="panel">등록된 양식이 없습니다.</div>';
+      if (state.viewer.authorized) {
+        grid.innerHTML = '<div class="panel">아직 내 양식이 없습니다. 관리자 화면에서 새 양식을 저장해 보세요.</div>';
+      } else if (state.viewer.loggedIn) {
+        grid.innerHTML = '<div class="panel">이 계정은 허용된 사용자 목록에 없습니다. admin_users 테이블에 이메일을 추가한 뒤 다시 확인해 주세요.</div>';
+      } else {
+        grid.innerHTML = '<div class="panel">양식 목록은 로그인한 관리자에게만 보입니다. 서명자는 전달받은 요청 링크로 바로 접속하면 됩니다.</div>';
+      }
       return;
     }
 
@@ -195,7 +227,7 @@
     $("#document-title").textContent = template.name;
     $("#document-meta").textContent = request
       ? `${request.recipientName || "수신자"} · 만료일 ${formatDateTime(request.expiresAt)}`
-      : "직접 작성 모드";
+      : (state.viewer.authorized ? "내 계정 직접 작성 모드" : "직접 작성 모드");
 
     const alert = $("#request-alert");
     if (request && request.message) {
@@ -522,27 +554,129 @@
     return canvas.toDataURL("image/png");
   }
 
+  function initSupabase() {
+    if (!supabaseClientFactory) {
+      throw new Error("Supabase 클라이언트를 불러오지 못했습니다. index.html의 CDN 스크립트를 확인해 주세요.");
+    }
+    state.supabase = supabaseClientFactory(resolveSupabaseUrl(), resolveAnonKey(), {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    });
+  }
+
+  async function refreshAuthSession() {
+    if (!state.supabase) return null;
+    const { data, error } = await state.supabase.auth.getSession();
+    if (error) throw error;
+    setAuthSession(data.session || null);
+    return data.session || null;
+  }
+
+  function setAuthSession(session) {
+    state.authSession = session || null;
+    state.authUser = session?.user || null;
+    const nextEmail = state.authUser?.email || "";
+    state.viewer = {
+      ...state.viewer,
+      loggedIn: Boolean(state.authUser),
+      authorized: nextEmail && state.viewer.email === nextEmail ? state.viewer.authorized : false,
+      email: nextEmail,
+      displayName:
+        state.authUser?.user_metadata?.full_name ||
+        state.authUser?.user_metadata?.name ||
+        nextEmail,
+    };
+  }
+
+  function renderAdminGate(mode, message) {
+    const loginCard = $("#admin-login");
+    const workspace = $("#admin-workspace");
+    const title = $("#admin-auth-title");
+    const copy = $("#admin-auth-copy");
+    const email = $("#admin-auth-email");
+    const submitButton = $("#admin-login-submit");
+    const logoutButton = $("#admin-logout-gate");
+    const userEmail = state.authUser?.email || state.viewer.email || "";
+
+    if (mode === "workspace") {
+      loginCard.classList.add("hidden");
+      workspace.classList.remove("hidden");
+      return;
+    }
+
+    workspace.classList.add("hidden");
+    loginCard.classList.remove("hidden");
+
+    if (mode === "forbidden") {
+      title.textContent = "접근 권한 없음";
+      copy.textContent = message || "이 계정은 허용된 사용자 목록에 없습니다. admin_users 테이블에 이메일을 먼저 추가해 주세요.";
+      submitButton.textContent = "다른 계정으로 로그인";
+      logoutButton.classList.remove("hidden");
+      if (userEmail) {
+        email.textContent = `현재 로그인: ${userEmail}`;
+        email.classList.remove("hidden");
+      }
+      return;
+    }
+
+    title.textContent = "관리자 로그인";
+    copy.textContent = "허용된 Google 계정으로 로그인하면 본인 데이터만 볼 수 있습니다.";
+    submitButton.textContent = "Google로 로그인";
+    logoutButton.classList.add("hidden");
+    if (userEmail) {
+      email.textContent = `현재 로그인: ${userEmail}`;
+      email.classList.remove("hidden");
+    } else {
+      email.classList.add("hidden");
+      email.textContent = "";
+    }
+  }
+
+  function updateAdminIdentity() {
+    const currentUser = state.adminData?.currentUser || {};
+    const displayName =
+      currentUser.displayName ||
+      state.authUser?.user_metadata?.full_name ||
+      state.authUser?.user_metadata?.name ||
+      state.authUser?.email ||
+      "관리자";
+    const email = currentUser.email || state.authUser?.email || "";
+    $("#admin-user-name").textContent = displayName;
+    $("#admin-user-email").textContent = email;
+  }
+
   async function openAdmin() {
     showScreen("admin-screen");
-    if (state.adminSessionToken) {
-      $("#admin-login").classList.add("hidden");
-      $("#admin-workspace").classList.remove("hidden");
-      await loadAdminDashboard();
-    } else {
-      $("#admin-login").classList.remove("hidden");
-      $("#admin-workspace").classList.add("hidden");
+    await refreshAuthSession();
+    if (!state.authUser) {
+      renderAdminGate("login");
+      return;
     }
+
+    await loadAdminDashboard();
   }
 
   async function adminLogin(event) {
     event.preventDefault();
     showLoading(true);
     try {
-      const result = await api("adminLogin", { password: $("#admin-password").value });
-      state.adminSessionToken = result.sessionToken;
-      localStorage.setItem("esign_admin_session", state.adminSessionToken);
-      $("#admin-password").value = "";
-      await openAdmin();
+      if (!state.supabase) {
+        throw new Error("Supabase 인증 클라이언트를 초기화하지 못했습니다.");
+      }
+      if (state.authSession) {
+        await state.supabase.auth.signOut();
+        setAuthSession(null);
+      }
+      const { error } = await state.supabase.auth.signInWithOAuth({
+        provider: String(config.OAUTH_PROVIDER || "google").toLowerCase(),
+        options: {
+          redirectTo: `${currentSiteUrl()}?admin=1`,
+        },
+      });
+      if (error) throw error;
     } catch (error) {
       showError(error);
     } finally {
@@ -550,28 +684,40 @@
     }
   }
 
-  function adminLogout() {
-    state.adminSessionToken = "";
-    localStorage.removeItem("esign_admin_session");
-    openAdmin();
+  async function adminLogout() {
+    try {
+      if (state.supabase) {
+        await state.supabase.auth.signOut();
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      state.adminData = null;
+      setAuthSession(null);
+      state.viewer = { loggedIn: false, authorized: false, email: "", displayName: "" };
+      await loadBootstrap();
+      renderAdminGate("login");
+      showScreen("admin-screen");
+    }
   }
 
   async function loadAdminDashboard() {
     showLoading(true);
     try {
       state.adminData = await api("adminDashboard", {}, true);
+      renderAdminGate("workspace");
       renderAdminData();
     } catch (error) {
-      state.adminSessionToken = "";
-      localStorage.removeItem("esign_admin_session");
-      showError(error);
-      await openAdmin();
+      state.adminData = null;
+      renderAdminGate("forbidden", error.message || String(error));
     } finally {
       showLoading(false);
     }
   }
 
   function renderAdminData() {
+    state.viewer = state.adminData?.currentUser || state.viewer;
+    updateAdminIdentity();
     renderAdminTemplateSelects();
     renderRequests();
     renderSubmissions();
@@ -581,6 +727,13 @@
     const templates = state.adminData?.templates || [];
     const requestSelect = $("#request-template");
     const picker = $("#template-picker");
+
+    if (!templates.length) {
+      requestSelect.innerHTML = "";
+      picker.innerHTML = '<option value="">새 양식 작성</option>';
+      clearTemplateForm();
+      return;
+    }
 
     requestSelect.innerHTML = templates.map((template) =>
       `<option value="${escapeHtml(template.id)}">${escapeHtml(template.name)}</option>`
@@ -1267,14 +1420,20 @@
     if (!config.API_URL || config.API_URL.includes("YOUR_PROJECT_REF")) {
       throw new Error("src/config.js의 API_URL을 Supabase Edge Function 주소로 설정해 주세요.");
     }
-    if (!config.ANON_KEY || config.ANON_KEY.includes("YOUR_SUPABASE_ANON_KEY")) {
-      throw new Error("src/config.js의 ANON_KEY를 Supabase anon public key로 설정해 주세요.");
+    if (!resolveAnonKey() || resolveAnonKey().includes("YOUR_SUPABASE_ANON_KEY")) {
+      throw new Error("src/config.js의 SUPABASE_ANON_KEY를 Supabase anon public key로 설정해 주세요.");
+    }
+
+    const session = state.supabase ? await refreshAuthSession() : null;
+    const accessToken = session?.access_token || "";
+    if (admin && !accessToken) {
+      throw new Error("관리자 작업은 로그인 후 사용할 수 있습니다.");
     }
 
     const headers = {
       "Content-Type": "application/json",
-      apikey: config.ANON_KEY,
-      Authorization: `Bearer ${config.ANON_KEY}`,
+      apikey: resolveAnonKey(),
+      Authorization: `Bearer ${accessToken || resolveAnonKey()}`,
     };
 
     const response = await fetch(config.API_URL, {
@@ -1283,7 +1442,6 @@
       body: JSON.stringify({
         action,
         payload: payload || {},
-        sessionToken: admin ? state.adminSessionToken : "",
       }),
     });
 
@@ -1367,6 +1525,26 @@
 
   function showError(error) {
     alert(error && error.message ? error.message : String(error));
+  }
+
+  function resolveSupabaseUrl() {
+    if (config.SUPABASE_URL) return config.SUPABASE_URL;
+    try {
+      return new URL(config.API_URL).origin;
+    } catch (error) {
+      throw new Error("src/config.js의 SUPABASE_URL 또는 API_URL 설정을 확인해 주세요.");
+    }
+  }
+
+  function resolveAnonKey() {
+    return config.SUPABASE_ANON_KEY || config.ANON_KEY || "";
+  }
+
+  function readAuthHashError() {
+    const hash = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
+    if (!hash) return "";
+    const params = new URLSearchParams(hash);
+    return params.get("error_description") || params.get("error") || "";
   }
 
   function currentSiteUrl() {
