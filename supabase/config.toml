@@ -1,0 +1,4 @@
+project_id = "esign-supabase"
+
+[functions.signature-api]
+verify_jwt = false

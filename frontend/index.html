@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>전자서명</title>
+  <link rel="stylesheet" href="./src/styles.css">
+  <script src="./src/config.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <button class="brand" type="button" data-action="home">
+        <span>전자서명</span>
+        <small>요청 링크 기반 문서 서명</small>
+      </button>
+      <nav class="nav">
+        <button type="button" data-action="verify">검증</button>
+        <button type="button" data-action="admin">관리자</button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section id="home-screen" class="screen active">
+      <div class="shell hero">
+        <div>
+          <p class="eyebrow">Signature Request</p>
+          <h1>문서를 선택하고 링크로 서명을 받습니다.</h1>
+          <p class="hero-copy">관리자는 요청 링크를 생성하고, 서명자는 링크에서 문서를 작성해 제출합니다. 제출된 문서는 검증번호로 이력을 확인할 수 있습니다.</p>
+        </div>
+        <form id="verify-inline-form" class="verify-box">
+          <label for="verify-inline-code">문서 검증번호</label>
+          <div class="input-row">
+            <input id="verify-inline-code" name="code" placeholder="예: ES-ABC12345">
+            <button class="btn primary" type="submit">검증</button>
+          </div>
+        </form>
+      </div>
+      <section class="shell section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Templates</p>
+            <h2>서명 양식</h2>
+          </div>
+        </div>
+        <div id="template-grid" class="template-grid"></div>
+      </section>
+    </section>
+
+    <section id="document-screen" class="screen">
+      <div class="workspace">
+        <aside class="side-panel">
+          <div class="panel">
+            <p class="eyebrow">Progress</p>
+            <h2 id="document-title">문서</h2>
+            <p id="document-meta" class="muted"></p>
+            <div class="progress">
+              <div id="progress-bar"></div>
+            </div>
+            <p id="progress-text" class="muted"></p>
+          </div>
+          <div class="panel">
+            <h3>필수 항목</h3>
+            <div id="field-list" class="field-list"></div>
+          </div>
+        </aside>
+        <section class="document-area">
+          <div id="request-alert" class="notice hidden"></div>
+          <article id="document-paper" class="document-paper"></article>
+          <div class="document-actions">
+            <button class="btn secondary" type="button" data-action="home">취소</button>
+            <button id="submit-signature" class="btn primary" type="button">서명 제출</button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section id="success-screen" class="screen">
+      <div class="center-layout">
+        <div class="result-card">
+          <p class="eyebrow">Completed</p>
+          <h2>문서 제출이 완료되었습니다.</h2>
+          <p id="success-copy" class="muted"></p>
+          <div id="success-summary" class="summary-grid"></div>
+          <button class="btn primary" type="button" data-action="home">처음으로</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="verify-screen" class="screen">
+      <div class="center-layout">
+        <form id="verify-form" class="result-card">
+          <p class="eyebrow">Verification</p>
+          <h2>문서 이력 검증</h2>
+          <label for="verify-code">검증번호</label>
+          <div class="input-row">
+            <input id="verify-code" placeholder="예: ES-ABC12345">
+            <button class="btn primary" type="submit">검증</button>
+          </div>
+          <div id="verify-result" class="verify-result"></div>
+        </form>
+      </div>
+    </section>
+
+    <section id="admin-screen" class="screen">
+      <div class="admin-layout">
+        <form id="admin-login" class="admin-login panel">
+          <p class="eyebrow">Admin</p>
+          <h2>관리자 로그인</h2>
+          <label for="admin-password">비밀번호</label>
+          <div class="input-row">
+            <input id="admin-password" type="password" autocomplete="current-password">
+            <button class="btn primary" type="submit">로그인</button>
+          </div>
+        </form>
+
+        <div id="admin-workspace" class="admin-workspace hidden">
+          <div class="admin-head">
+            <div>
+              <p class="eyebrow">Dashboard</p>
+              <h2>관리자</h2>
+            </div>
+            <button id="admin-logout" class="btn secondary" type="button">로그아웃</button>
+          </div>
+          <div class="tabs">
+            <button class="tab active" type="button" data-tab="requests">요청 링크</button>
+            <button class="tab" type="button" data-tab="submissions">제출 문서</button>
+            <button class="tab" type="button" data-tab="templates">양식 관리</button>
+          </div>
+
+          <section id="tab-requests" class="tab-panel active">
+            <div class="panel">
+              <h3>요청 링크 생성</h3>
+              <form id="request-form" class="form-grid">
+                <label>양식
+                  <select id="request-template" required></select>
+                </label>
+                <label>수신자 이름
+                  <input id="request-recipient" placeholder="선택 입력">
+                </label>
+                <label>만료일
+                  <input id="request-expires" type="number" min="1" value="7">
+                </label>
+                <label class="full">안내 메모
+                  <textarea id="request-message" rows="3" placeholder="선택 입력"></textarea>
+                </label>
+                <div class="full actions-left">
+                  <button class="btn primary" type="submit">요청 링크 생성</button>
+                </div>
+              </form>
+              <div id="request-link-result" class="copy-result hidden">
+                <label for="generated-link">생성된 요청 링크</label>
+                <div class="input-row">
+                  <input id="generated-link" readonly>
+                  <button id="copy-generated-link" class="btn secondary" type="button">복사</button>
+                </div>
+              </div>
+            </div>
+            <div class="panel">
+              <h3>최근 요청</h3>
+              <div id="request-list" class="table-list"></div>
+            </div>
+          </section>
+
+          <section id="tab-submissions" class="tab-panel">
+            <div class="panel">
+              <h3>제출 문서</h3>
+              <div id="submission-list" class="table-list"></div>
+            </div>
+          </section>
+
+          <section id="tab-templates" class="tab-panel">
+            <div class="panel">
+              <h3>양식 편집</h3>
+              <form id="template-form" class="form-grid">
+                <input id="template-id" type="hidden">
+                <label>기존 양식
+                  <select id="template-picker"></select>
+                </label>
+                <label>양식명
+                  <input id="template-name" required>
+                </label>
+                <label>분류
+                  <input id="template-category">
+                </label>
+                <label>설명
+                  <input id="template-description">
+                </label>
+                <label class="full">본문 HTML
+                  <textarea id="template-content" rows="15" required></textarea>
+                </label>
+                <div class="full actions-left">
+                  <button class="btn secondary" id="new-template" type="button">새 양식</button>
+                  <button class="btn primary" type="submit">저장</button>
+                </div>
+              </form>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="signature-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Signature</p>
+          <h2 id="signature-title">서명</h2>
+        </div>
+        <button class="icon-btn" id="close-signature" type="button" aria-label="닫기">×</button>
+      </div>
+      <div class="signature-tabs">
+        <button class="active" type="button" data-sign-tab="draw">직접 그리기</button>
+        <button type="button" data-sign-tab="type">이름으로 생성</button>
+      </div>
+      <div id="draw-panel" class="signature-panel active">
+        <canvas id="signature-canvas"></canvas>
+        <button class="btn secondary" id="clear-signature" type="button">지우기</button>
+      </div>
+      <div id="type-panel" class="signature-panel">
+        <label for="typed-name">이름</label>
+        <input id="typed-name" placeholder="서명에 사용할 이름">
+        <div id="typed-preview" class="typed-preview">서명</div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn secondary" id="cancel-signature" type="button">취소</button>
+        <button class="btn primary" id="apply-signature" type="button">서명 적용</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="detail-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card wide">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Submission</p>
+          <h2>제출 문서</h2>
+        </div>
+        <button class="icon-btn" id="close-detail" type="button" aria-label="닫기">×</button>
+      </div>
+      <div id="detail-preview" class="detail-preview"></div>
+      <div class="modal-actions">
+        <button class="btn secondary" id="print-detail" type="button">PDF 저장/인쇄</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="loading" class="loading hidden">
+    <div></div>
+    <span>처리 중입니다.</span>
+  </div>
+
+  <script src="./src/app.js"></script>
+</body>
+</html>
