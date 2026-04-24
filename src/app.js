@@ -721,10 +721,10 @@
 
   async function api(action, payload, admin) {
     if (!config.API_URL || config.API_URL.includes("YOUR_PROJECT_REF")) {
-      throw new Error("frontend/src/config.js의 API_URL을 Supabase Edge Function 주소로 설정해 주세요.");
+      throw new Error("src/config.js의 API_URL을 Supabase Edge Function 주소로 설정해 주세요.");
     }
     if (!config.ANON_KEY || config.ANON_KEY.includes("YOUR_SUPABASE_ANON_KEY")) {
-      throw new Error("frontend/src/config.js의 ANON_KEY를 Supabase anon public key로 설정해 주세요.");
+      throw new Error("src/config.js의 ANON_KEY를 Supabase anon public key로 설정해 주세요.");
     }
 
     const headers = {
