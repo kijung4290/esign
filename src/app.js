@@ -1,5 +1,12 @@
 (function () {
   const config = window.ESIGN_CONFIG || {};
+  const FIELD_TYPE_META = {
+    text: { icon: "T", label: "입력칸" },
+    date: { icon: "D", label: "날짜" },
+    check: { icon: "✓", label: "체크" },
+    sign: { icon: "S", label: "서명" },
+  };
+
   const state = {
     templates: [],
     selectedTemplate: null,
@@ -12,6 +19,12 @@
     isDrawing: false,
     canvas: null,
     ctx: null,
+    templateEditorSavedRange: null,
+    activeTemplateInlineFieldId: "",
+    templateFieldMode: "create",
+    templateFieldEditId: "",
+    isSyncingTemplateEditor: false,
+    templateEditorDirty: false,
   };
 
   const $ = (selector) => document.querySelector(selector);
@@ -78,8 +91,39 @@
     $("#request-form").addEventListener("submit", createRequestLink);
     $("#copy-generated-link").addEventListener("click", copyGeneratedLink);
     $("#template-form").addEventListener("submit", saveTemplate);
+    $("#save-template-top").addEventListener("click", () => saveTemplate());
     $("#new-template").addEventListener("click", clearTemplateForm);
     $("#template-picker").addEventListener("change", fillTemplateForm);
+    $("#template-content").addEventListener("input", handleTemplateHtmlInput);
+    $("#template-live-editor").addEventListener("input", handleLiveTemplateEditorInput);
+    $("#template-live-editor").addEventListener("keyup", saveTemplateEditorSelection);
+    $("#template-live-editor").addEventListener("mouseup", saveTemplateEditorSelection);
+    $("#template-live-editor").addEventListener("focus", saveTemplateEditorSelection);
+    $("#template-live-editor").addEventListener("paste", handleLiveTemplateEditorPaste);
+    $("#template-name").addEventListener("input", markTemplateDirty);
+    $("#template-category").addEventListener("input", markTemplateDirty);
+    $("#template-description").addEventListener("input", markTemplateDirty);
+    $("#edit-selected-field").addEventListener("click", editSelectedTemplateInlineField);
+    $("#delete-selected-field").addEventListener("click", deleteSelectedTemplateInlineField);
+    $("#template-selection-size").addEventListener("change", (event) => applySelectedTemplateFieldSize(event.target.value));
+    $("#template-field-form").addEventListener("submit", submitTemplateFieldForm);
+    $("#close-template-field").addEventListener("click", closeTemplateFieldModal);
+    $("#cancel-template-field").addEventListener("click", closeTemplateFieldModal);
+    $("#template-field-type").addEventListener("change", updateTemplateFieldModalVisibility);
+    ["template-field-label", "template-field-name", "template-field-placeholder", "template-field-role", "template-field-size", "template-field-required"].forEach((id) => {
+      $(`#${id}`).addEventListener("input", updateTemplateFieldTagPreview);
+      $(`#${id}`).addEventListener("change", updateTemplateFieldTagPreview);
+    });
+
+    $$("[data-snippet]").forEach((button) => {
+      button.addEventListener("click", () => insertTemplateSnippet(button.dataset.snippet));
+    });
+    $$("[data-field-type]").forEach((button) => {
+      button.addEventListener("click", () => openTemplateFieldModal(button.dataset.fieldType, "create"));
+    });
+    $$("[data-starter]").forEach((button) => {
+      button.addEventListener("click", () => applyTemplateStarter(button.dataset.starter));
+    });
 
     $$(".tab").forEach((button) => {
       button.addEventListener("click", () => switchAdminTab(button.dataset.tab));
@@ -627,23 +671,31 @@
       return;
     }
     $("#template-id").value = template.id;
+    $("#template-id-display").value = template.id;
     $("#template-name").value = template.name || "";
     $("#template-category").value = template.category || "";
     $("#template-description").value = template.description || "";
     $("#template-content").value = template.content || "";
+    renderTemplateLiveEditorFromContent(template.content || "");
+    setTemplateDirty(false);
   }
 
   function clearTemplateForm() {
     $("#template-picker").value = "";
     $("#template-id").value = "";
+    $("#template-id-display").value = "";
     $("#template-name").value = "";
     $("#template-category").value = "";
     $("#template-description").value = "";
-    $("#template-content").value = "";
+    const starter = getTemplateStarter("consent");
+    $("#template-content").value = starter;
+    renderTemplateLiveEditorFromContent(starter);
+    setTemplateDirty(true);
   }
 
   async function saveTemplate(event) {
-    event.preventDefault();
+    if (event) event.preventDefault();
+    syncTemplateLiveEditorToHtml();
     showLoading(true);
     try {
       await api("saveTemplateConfig", {
@@ -655,6 +707,7 @@
       }, true);
       await loadAdminDashboard();
       await loadBootstrap();
+      setTemplateDirty(false);
       alert("양식이 저장되었습니다.");
       switchAdminTab("templates");
     } catch (error) {
@@ -662,6 +715,497 @@
     } finally {
       showLoading(false);
     }
+  }
+
+  function renderTemplateLiveEditorFromContent(content) {
+    const editor = $("#template-live-editor");
+    const html = String(content || "");
+    const records = getTemplateFieldRecords(html);
+    let cursor = 0;
+    let nextHtml = "";
+
+    records.forEach((record) => {
+      nextHtml += html.slice(cursor, record.start);
+      nextHtml += renderTemplateInlineFieldHtml(record.field);
+      cursor = record.end;
+    });
+    nextHtml += html.slice(cursor);
+
+    state.isSyncingTemplateEditor = true;
+    editor.innerHTML = nextHtml.trim();
+    state.isSyncingTemplateEditor = false;
+    selectTemplateInlineField("");
+    bindTemplateInlineFieldEvents();
+    updateTemplateEditorMeta();
+    saveTemplateEditorSelection();
+  }
+
+  function bindTemplateInlineFieldEvents() {
+    const editor = $("#template-live-editor");
+    editor.querySelectorAll(".template-inline-field").forEach((element) => {
+      element.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        selectTemplateInlineField(element.dataset.templateInlineFieldId);
+      });
+      element.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openTemplateFieldModal(element.dataset.fieldType || "text", "edit", element.dataset.templateInlineFieldId);
+      });
+    });
+  }
+
+  function getTemplateFieldRecords(content) {
+    const records = [];
+    const pattern = /\[\[(text|date|check|sign):([^\]]+)\]\]/g;
+    let match;
+    let index = 0;
+    while ((match = pattern.exec(content || "")) !== null) {
+      records.push({
+        key: `field-record-${index}-${match.index}`,
+        type: match[1],
+        raw: match[0],
+        start: match.index,
+        end: match.index + match[0].length,
+        field: parseFieldSpec(match[1], match[2], index),
+      });
+      index += 1;
+    }
+    return records;
+  }
+
+  function renderTemplateInlineFieldHtml(field) {
+    const id = `template-field-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const meta = FIELD_TYPE_META[field.type] || FIELD_TYPE_META.text;
+    const label = field.type === "sign" ? (field.role || field.label || field.name) : (field.label || field.name);
+    return `
+      <span class="template-inline-field template-field-size-${normalizeFieldSize(field.size)}"
+        contenteditable="false"
+        data-template-inline-field-id="${id}"
+        data-field-type="${escapeHtml(field.type)}"
+        data-field-name="${escapeHtml(field.name)}"
+        data-field-label="${escapeHtml(field.label)}"
+        data-field-placeholder="${escapeHtml(field.placeholder || "")}"
+        data-field-role="${escapeHtml(field.role || "")}"
+        data-field-required="${field.required ? "true" : "false"}"
+        data-field-size="${escapeHtml(normalizeFieldSize(field.size))}"
+        title="클릭해서 선택, 더블클릭해서 설정 수정">
+        <span class="template-inline-field-icon">${escapeHtml(meta.icon)}</span>
+        <span class="template-inline-field-copy">
+          <strong>${escapeHtml(label)}</strong>
+          <span>${escapeHtml(meta.label)} · ${field.required ? "필수" : "선택"}</span>
+        </span>
+      </span>
+    `;
+  }
+
+  function handleLiveTemplateEditorInput() {
+    if (state.isSyncingTemplateEditor) return;
+    saveTemplateEditorSelection();
+    syncTemplateLiveEditorToHtml({ skipRender: true });
+    bindTemplateInlineFieldEvents();
+    setTemplateDirty(true);
+    updateTemplateEditorMeta();
+  }
+
+  function handleLiveTemplateEditorPaste(event) {
+    event.preventDefault();
+    const text = (event.clipboardData || window.clipboardData).getData("text/plain");
+    insertTemplateEditorFragment(escapeHtml(text).replace(/\r?\n/g, "<br>"));
+  }
+
+  function handleTemplateHtmlInput() {
+    if (state.isSyncingTemplateEditor) return;
+    renderTemplateLiveEditorFromContent($("#template-content").value || "");
+    setTemplateDirty(true);
+  }
+
+  function syncTemplateLiveEditorToHtml(options = {}) {
+    const editor = $("#template-live-editor");
+    const htmlEditor = $("#template-content");
+    if (!editor || !htmlEditor) return;
+
+    const clone = editor.cloneNode(true);
+    clone.querySelectorAll(".template-inline-field").forEach((element) => {
+      element.replaceWith(clone.ownerDocument.createTextNode(buildFieldTagFromElement(element)));
+    });
+    clone.querySelectorAll("[contenteditable]").forEach((element) => element.removeAttribute("contenteditable"));
+
+    state.isSyncingTemplateEditor = true;
+    htmlEditor.value = cleanupTemplateEditorHtml(clone.innerHTML);
+    state.isSyncingTemplateEditor = false;
+
+    if (!options.skipRender) updateTemplateEditorMeta();
+  }
+
+  function cleanupTemplateEditorHtml(html) {
+    return String(html || "")
+      .replace(/\sdata-template-inline-field-id="[^"]*"/g, "")
+      .replace(/\sdata-field-[a-z-]+="[^"]*"/g, "")
+      .replace(/\sclass="template-inline-field[^"]*"/g, "")
+      .trim();
+  }
+
+  function saveTemplateEditorSelection() {
+    const editor = $("#template-live-editor");
+    const selection = window.getSelection();
+    if (!editor || !selection || !selection.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    const node = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentNode;
+    if (node === editor || editor.contains(node)) {
+      state.templateEditorSavedRange = range.cloneRange();
+    }
+  }
+
+  function getTemplateEditorInsertionRange() {
+    const editor = $("#template-live-editor");
+    let range = state.templateEditorSavedRange;
+    if (!range) {
+      range = document.createRange();
+      range.selectNodeContents(editor);
+      range.collapse(false);
+    }
+    const selection = window.getSelection();
+    editor.focus();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return range;
+  }
+
+  function insertTemplateEditorFragment(html) {
+    const range = getTemplateEditorInsertionRange();
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    const fragment = document.createDocumentFragment();
+    let lastNode = null;
+    while (container.firstChild) {
+      lastNode = container.firstChild;
+      fragment.appendChild(lastNode);
+    }
+    range.deleteContents();
+    range.insertNode(fragment);
+    if (lastNode) {
+      range.setStartAfter(lastNode);
+      range.collapse(true);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      state.templateEditorSavedRange = range.cloneRange();
+    }
+    handleLiveTemplateEditorInput();
+  }
+
+  function insertTemplateSnippet(type) {
+    const snippets = {
+      heading: '<h2 style="margin:24px 0 12px;font-size:22px;color:#111827;">새 제목</h2><p style="margin:0 0 16px;line-height:1.8;color:#374151;">내용을 입력하세요.</p>',
+      paragraph: '<p style="margin:16px 0;line-height:1.8;color:#374151;">문단 내용을 입력하세요.</p>',
+      notice: '<div style="margin:20px 0;padding:16px 18px;border-radius:16px;border:1px solid #dbeafe;background:#eff6ff;color:#1e3a8a;line-height:1.8;">중요 안내 문구를 입력하세요.</div>',
+      table: '<table style="width:100%;border-collapse:collapse;margin:16px 0;"><tbody><tr><th style="width:30%;padding:12px;background:#f3f4f6;border:1px solid #d1d5db;text-align:left;">항목</th><td style="padding:12px;border:1px solid #d1d5db;">내용을 입력하세요.</td></tr></tbody></table>',
+    };
+    insertTemplateEditorFragment(snippets[type] || snippets.paragraph);
+  }
+
+  function applyTemplateStarter(type) {
+    const html = getTemplateStarter(type);
+    $("#template-content").value = html;
+    renderTemplateLiveEditorFromContent(html);
+    setTemplateDirty(true);
+  }
+
+  function getTemplateStarter(type) {
+    const starters = {
+      consent: '<section class="doc-heading"><p>CONSENT</p><h1>개인정보 수집 이용 동의서</h1></section><p>아래 내용을 확인하고 개인정보 수집 및 이용에 동의합니다.</p><table class="doc-table"><tr><th>성명</th><td>[[text:성명|required|placeholder=성명을 입력하세요]]</td></tr><tr><th>생년월일</th><td>[[text:생년월일|required|placeholder=예: 1970-01-01]]</td></tr><tr><th>연락처</th><td>[[text:연락처|required|placeholder=010-0000-0000]]</td></tr></table><p>[[check:개인정보동의|required|label=개인정보 수집 및 이용에 동의합니다.]]</p><p>본인 서명: [[sign:본인서명|required|role=본인]]</p>',
+      application: '<section class="doc-heading"><p>APPLICATION</p><h1>프로그램 참여 신청서</h1></section><table class="doc-table"><tr><th>프로그램명</th><td>[[text:프로그램명|required|placeholder=프로그램명]]</td></tr><tr><th>참여자 성명</th><td>[[text:참여자성명|required|placeholder=성명]]</td></tr><tr><th>연락처</th><td>[[text:연락처|required|placeholder=010-0000-0000]]</td></tr></table><p>[[check:참여동의|required|label=프로그램 운영 안내와 유의사항을 확인했습니다.]]</p><p>참여자 서명: [[sign:참여자서명|required|role=참여자]]</p>',
+      pledge: '<section class="doc-heading"><p>PLEDGE</p><h1>서약서</h1></section><p>본인은 아래 내용을 확인하고 성실히 이행할 것을 서약합니다.</p><table class="doc-table"><tr><th>성명</th><td>[[text:성명|required|placeholder=성명]]</td></tr><tr><th>작성일</th><td>[[date:작성일|required]]</td></tr></table><p>[[check:서약확인|required|label=서약 내용을 확인했습니다.]]</p><p>서명: [[sign:서약자서명|required|role=서약자]]</p>',
+    };
+    return starters[type] || starters.consent;
+  }
+
+  function openTemplateFieldModal(type, mode = "create", inlineFieldId = "") {
+    const element = inlineFieldId ? getTemplateInlineFieldElement(inlineFieldId) : null;
+    const current = element ? getTemplateInlineFieldConfig(element) : getDefaultFieldConfig(type);
+    state.templateFieldMode = mode;
+    state.templateFieldEditId = inlineFieldId || "";
+
+    $("#template-field-modal-title").textContent = mode === "edit" ? "입력칸 설정 수정" : "입력칸 추가";
+    $("#template-field-type").value = current.type;
+    $("#template-field-label").value = current.label || "";
+    $("#template-field-name").value = current.name || "";
+    $("#template-field-placeholder").value = current.placeholder || "";
+    $("#template-field-role").value = current.role || "";
+    $("#template-field-size").value = normalizeFieldSize(current.size);
+    $("#template-field-required").checked = current.required !== false;
+    updateTemplateFieldModalVisibility();
+    updateTemplateFieldTagPreview();
+    $("#template-field-modal").classList.remove("hidden");
+    $("#template-field-label").focus();
+  }
+
+  function closeTemplateFieldModal() {
+    $("#template-field-modal").classList.add("hidden");
+    state.templateFieldMode = "create";
+    state.templateFieldEditId = "";
+  }
+
+  function updateTemplateFieldModalVisibility() {
+    const type = $("#template-field-type").value;
+    $("#template-field-placeholder-wrap").classList.toggle("hidden", type === "check" || type === "sign" || type === "date");
+    $("#template-field-role-wrap").classList.toggle("hidden", type !== "sign");
+    if (type === "sign" && !$("#template-field-role").value.trim()) $("#template-field-role").value = "본인";
+    updateTemplateFieldTagPreview();
+  }
+
+  function submitTemplateFieldForm(event) {
+    event.preventDefault();
+    const field = readTemplateFieldForm();
+    if (!field.label) {
+      alert("표시 이름을 입력해 주세요.");
+      return;
+    }
+    if (state.templateFieldMode === "edit") {
+      const element = getTemplateInlineFieldElement(state.templateFieldEditId);
+      if (element) updateTemplateInlineFieldElement(element, field);
+    } else {
+      const temp = document.createElement("span");
+      updateTemplateInlineFieldElement(temp, field);
+      insertTemplateEditorFragment(temp.outerHTML + " ");
+    }
+    closeTemplateFieldModal();
+    handleLiveTemplateEditorInput();
+  }
+
+  function readTemplateFieldForm() {
+    const label = $("#template-field-label").value.trim();
+    const type = $("#template-field-type").value;
+    return {
+      id: "",
+      type,
+      label,
+      name: buildSafeFieldName($("#template-field-name").value.trim() || label || "필드"),
+      placeholder: $("#template-field-placeholder").value.trim(),
+      role: $("#template-field-role").value.trim(),
+      size: normalizeFieldSize($("#template-field-size").value),
+      required: $("#template-field-required").checked,
+    };
+  }
+
+  function updateTemplateFieldTagPreview() {
+    const preview = $("#template-field-tag-preview");
+    if (preview) preview.textContent = buildFieldTagFromConfig(readTemplateFieldForm());
+  }
+
+  function getDefaultFieldConfig(type) {
+    const labels = { text: "성명", date: "작성일", check: "동의", sign: "본인서명" };
+    return {
+      type,
+      label: labels[type] || "입력칸",
+      name: labels[type] || "입력칸",
+      placeholder: type === "text" ? `${labels[type] || "내용"}을 입력하세요` : "",
+      role: type === "sign" ? "본인" : "",
+      size: type === "sign" ? "wide" : "medium",
+      required: true,
+    };
+  }
+
+  function updateTemplateInlineFieldElement(element, field) {
+    const normalized = Object.assign(getDefaultFieldConfig(field.type), field);
+    const id = element.dataset.templateInlineFieldId || `template-field-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const meta = FIELD_TYPE_META[normalized.type] || FIELD_TYPE_META.text;
+    const label = normalized.type === "sign" ? (normalized.role || normalized.label || normalized.name) : (normalized.label || normalized.name);
+    element.className = `template-inline-field template-field-size-${normalizeFieldSize(normalized.size)}`;
+    element.contentEditable = "false";
+    element.dataset.templateInlineFieldId = id;
+    element.dataset.fieldType = normalized.type;
+    element.dataset.fieldName = normalized.name;
+    element.dataset.fieldLabel = normalized.label;
+    element.dataset.fieldPlaceholder = normalized.placeholder || "";
+    element.dataset.fieldRole = normalized.role || "";
+    element.dataset.fieldRequired = normalized.required ? "true" : "false";
+    element.dataset.fieldSize = normalizeFieldSize(normalized.size);
+    element.title = "클릭해서 선택, 더블클릭해서 설정 수정";
+    element.innerHTML = `
+      <span class="template-inline-field-icon">${escapeHtml(meta.icon)}</span>
+      <span class="template-inline-field-copy">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(meta.label)} · ${normalized.required ? "필수" : "선택"}</span>
+      </span>
+    `;
+  }
+
+  function getTemplateInlineFieldElement(id) {
+    return id ? $(`#template-live-editor .template-inline-field[data-template-inline-field-id="${escapeSelector(id)}"]`) : null;
+  }
+
+  function getSelectedTemplateInlineField() {
+    return getTemplateInlineFieldElement(state.activeTemplateInlineFieldId);
+  }
+
+  function getTemplateInlineFieldConfig(element) {
+    return {
+      type: element.dataset.fieldType || "text",
+      name: buildSafeFieldName(element.dataset.fieldName || element.dataset.fieldLabel || "필드"),
+      label: element.dataset.fieldLabel || element.dataset.fieldName || "필드",
+      placeholder: element.dataset.fieldPlaceholder || "",
+      role: element.dataset.fieldRole || "",
+      required: element.dataset.fieldRequired !== "false",
+      size: normalizeFieldSize(element.dataset.fieldSize),
+    };
+  }
+
+  function selectTemplateInlineField(id) {
+    state.activeTemplateInlineFieldId = id || "";
+    $$("#template-live-editor .template-inline-field").forEach((element) => {
+      element.classList.toggle("is-selected", element.dataset.templateInlineFieldId === id);
+    });
+    renderTemplateSelectionToolbar();
+  }
+
+  function renderTemplateSelectionToolbar() {
+    const toolbar = $("#template-selection-toolbar");
+    const element = getSelectedTemplateInlineField();
+    toolbar.classList.toggle("active", Boolean(element));
+    if (!element) return;
+    const field = getTemplateInlineFieldConfig(element);
+    const meta = FIELD_TYPE_META[field.type] || FIELD_TYPE_META.text;
+    $("#template-selection-title").textContent = field.type === "sign" ? (field.role || field.label) : field.label;
+    $("#template-selection-detail").textContent = `${meta.label} · ${field.required ? "필수" : "선택"} · ${getFieldSizeLabel(field.size)}`;
+    $("#template-selection-size").value = normalizeFieldSize(field.size);
+  }
+
+  function editSelectedTemplateInlineField() {
+    const element = getSelectedTemplateInlineField();
+    if (element) openTemplateFieldModal(element.dataset.fieldType || "text", "edit", element.dataset.templateInlineFieldId);
+  }
+
+  function deleteSelectedTemplateInlineField() {
+    const element = getSelectedTemplateInlineField();
+    if (!element) return;
+    element.remove();
+    selectTemplateInlineField("");
+    handleLiveTemplateEditorInput();
+  }
+
+  function applySelectedTemplateFieldSize(size) {
+    const element = getSelectedTemplateInlineField();
+    if (!element) return;
+    const field = getTemplateInlineFieldConfig(element);
+    field.size = normalizeFieldSize(size);
+    updateTemplateInlineFieldElement(element, field);
+    selectTemplateInlineField(element.dataset.templateInlineFieldId);
+    handleLiveTemplateEditorInput();
+  }
+
+  function buildFieldTagFromElement(element) {
+    return buildFieldTagFromConfig(getTemplateInlineFieldConfig(element));
+  }
+
+  function buildFieldTagFromConfig(field) {
+    const name = buildSafeFieldName(field.name || field.label || "필드");
+    const parts = [name, field.required === false ? "optional" : "required"];
+    if (field.type === "text" && field.placeholder) parts.push(`placeholder=${sanitizeFieldOption(field.placeholder)}`);
+    if (field.type === "check" && field.label) parts.push(`label=${sanitizeFieldOption(field.label)}`);
+    if (field.type === "sign" && field.role) parts.push(`role=${sanitizeFieldOption(field.role)}`);
+    const size = normalizeFieldSize(field.size);
+    if (size !== "medium") parts.push(`size=${size}`);
+    return `[[${field.type}:${parts.join("|")}]]`;
+  }
+
+  function buildSafeFieldName(value) {
+    return String(value || "필드").trim().replace(/[|\[\]=]/g, "").replace(/\s+/g, "_");
+  }
+
+  function sanitizeFieldOption(value) {
+    return String(value || "").replace(/[|\[\]]/g, "").trim();
+  }
+
+  function normalizeFieldSize(value) {
+    return ["small", "medium", "wide", "full"].includes(value) ? value : "medium";
+  }
+
+  function getFieldSizeLabel(value) {
+    return { small: "작게", medium: "보통", wide: "넓게", full: "한 줄 전체" }[normalizeFieldSize(value)];
+  }
+
+  function updateTemplateEditorMeta() {
+    const records = Array.from($("#template-live-editor").querySelectorAll(".template-inline-field")).map((element, index) => ({
+      key: element.dataset.templateInlineFieldId,
+      index,
+      type: element.dataset.fieldType || "text",
+      field: getTemplateInlineFieldConfig(element),
+      element,
+    }));
+    const required = records.filter((record) => record.field.required).length;
+    const sign = records.filter((record) => record.type === "sign").length;
+    $("#template-field-count").textContent = `필드 ${records.length}개`;
+    $("#template-required-count").textContent = `필수 ${required}개`;
+    $("#template-optional-count").textContent = `선택 ${records.length - required}개`;
+    $("#template-sign-count").textContent = `서명 ${sign}개`;
+    renderTemplateFieldList(records);
+  }
+
+  function renderTemplateFieldList(records) {
+    const list = $("#template-field-list");
+    if (!records.length) {
+      list.innerHTML = '<div class="empty-state">입력칸을 추가하면 여기에서 한 번에 관리할 수 있습니다.</div>';
+      return;
+    }
+    list.innerHTML = records.map((record) => {
+      const meta = FIELD_TYPE_META[record.type] || FIELD_TYPE_META.text;
+      return `
+        <article class="template-field-item ${state.activeTemplateInlineFieldId === record.key ? "is-highlighted" : ""}" data-template-list-key="${escapeHtml(record.key)}">
+          <div class="template-field-item-head">
+            <div class="template-field-item-title">
+              <strong>${escapeHtml(record.field.label || record.field.name)}</strong>
+              <span>저장용 이름: ${escapeHtml(record.field.name)}</span>
+            </div>
+            <div class="template-field-item-tags">
+              <span class="template-chip">${escapeHtml(meta.label)}</span>
+              <span class="template-chip">${record.field.required ? "필수" : "선택"}</span>
+              <span class="template-chip">${getFieldSizeLabel(record.field.size)}</span>
+            </div>
+          </div>
+          <div class="template-field-actions">
+            <button class="mini-btn" type="button" data-locate-field="${escapeHtml(record.key)}">위치 보기</button>
+            <button class="mini-btn" type="button" data-edit-field="${escapeHtml(record.key)}">설정 수정</button>
+            <button class="mini-btn danger" type="button" data-delete-field="${escapeHtml(record.key)}">삭제</button>
+          </div>
+        </article>
+      `;
+    }).join("");
+    $$("[data-locate-field]").forEach((button) => {
+      button.addEventListener("click", () => locateTemplateInlineField(button.dataset.locateField));
+    });
+    $$("[data-edit-field]").forEach((button) => {
+      button.addEventListener("click", () => openTemplateFieldModal("text", "edit", button.dataset.editField));
+    });
+    $$("[data-delete-field]").forEach((button) => {
+      button.addEventListener("click", () => {
+        selectTemplateInlineField(button.dataset.deleteField);
+        deleteSelectedTemplateInlineField();
+      });
+    });
+  }
+
+  function locateTemplateInlineField(id) {
+    const element = getTemplateInlineFieldElement(id);
+    if (!element) return;
+    selectTemplateInlineField(id);
+    element.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function setTemplateDirty(dirty) {
+    state.templateEditorDirty = dirty;
+    const badge = $("#template-editor-status");
+    if (!badge) return;
+    badge.classList.toggle("dirty", dirty);
+    badge.textContent = dirty ? "수정 중" : "저장된 상태";
+  }
+
+  function markTemplateDirty() {
+    setTemplateDirty(true);
   }
 
   async function openSubmissionDetail(submissionId) {
@@ -855,5 +1399,12 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  function escapeSelector(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(String(value));
+    }
+    return String(value).replace(/["\\]/g, "\\$&");
   }
 })();

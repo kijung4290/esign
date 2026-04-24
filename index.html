@@ -124,12 +124,12 @@
             <button id="admin-logout" class="btn secondary" type="button">로그아웃</button>
           </div>
           <div class="tabs">
-            <button class="tab active" type="button" data-tab="requests">요청 링크</button>
+            <button class="tab active" type="button" data-tab="templates">양식 편집</button>
+            <button class="tab" type="button" data-tab="requests">요청 링크</button>
             <button class="tab" type="button" data-tab="submissions">제출 문서</button>
-            <button class="tab" type="button" data-tab="templates">양식 관리</button>
           </div>
 
-          <section id="tab-requests" class="tab-panel active">
+          <section id="tab-requests" class="tab-panel">
             <div class="panel">
               <h3>요청 링크 생성</h3>
               <form id="request-form" class="form-grid">
@@ -170,30 +170,112 @@
             </div>
           </section>
 
-          <section id="tab-templates" class="tab-panel">
+          <section id="tab-templates" class="tab-panel active">
             <div class="panel">
-              <h3>양식 편집</h3>
-              <form id="template-form" class="form-grid">
-                <input id="template-id" type="hidden">
-                <label>기존 양식
-                  <select id="template-picker"></select>
-                </label>
-                <label>양식명
-                  <input id="template-name" required>
-                </label>
-                <label>분류
-                  <input id="template-category">
-                </label>
-                <label>설명
-                  <input id="template-description">
-                </label>
-                <label class="full">본문 HTML
-                  <textarea id="template-content" rows="15" required></textarea>
-                </label>
-                <div class="full actions-left">
-                  <button class="btn secondary" id="new-template" type="button">새 양식</button>
-                  <button class="btn primary" type="submit">저장</button>
+              <div class="admin-section-head">
+                <div>
+                  <p class="eyebrow">Template Editor</p>
+                  <h3>출력 화면에서 바로 양식을 수정합니다.</h3>
+                  <p class="muted">서명자가 보게 될 문서를 그대로 보면서 문장과 입력칸을 클릭해 수정하세요.</p>
                 </div>
+                <div class="admin-tools">
+                  <button class="btn secondary" id="new-template" type="button">새 양식</button>
+                  <button class="btn primary" id="save-template-top" type="button">양식 저장</button>
+                </div>
+              </div>
+
+              <form id="template-form" class="template-editor">
+                <input id="template-id" type="hidden">
+                <section class="template-meta-panel">
+                  <div class="form-grid template-meta-grid">
+                    <label>수정할 양식
+                      <select id="template-picker"></select>
+                    </label>
+                    <label>템플릿 ID
+                      <input id="template-id-display" readonly>
+                    </label>
+                    <label>분류
+                      <input id="template-category" placeholder="예: 동의, 신청, 계약">
+                    </label>
+                    <label>양식명
+                      <input id="template-name" required placeholder="양식명을 입력하세요">
+                    </label>
+                    <label class="full">설명
+                      <textarea id="template-description" rows="2" placeholder="관리자와 사용자에게 보일 설명을 입력하세요."></textarea>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="template-live-shell">
+                  <div class="template-live-head">
+                    <div>
+                      <strong>실제 출력 양식</strong>
+                      <p class="muted">문장은 바로 입력하고, 입력칸은 클릭해서 설정을 수정합니다.</p>
+                    </div>
+                    <span id="template-editor-status" class="editor-status-badge">저장된 상태</span>
+                  </div>
+
+                  <div class="template-live-toolbar" aria-label="양식 편집 도구">
+                    <div class="editor-tool-group">
+                      <button class="editor-tool" type="button" data-snippet="heading">제목</button>
+                      <button class="editor-tool" type="button" data-snippet="paragraph">문단</button>
+                      <button class="editor-tool" type="button" data-snippet="notice">안내 박스</button>
+                      <button class="editor-tool" type="button" data-snippet="table">입력 표</button>
+                    </div>
+                    <div class="editor-tool-group">
+                      <button class="editor-tool" type="button" data-field-type="text">입력칸</button>
+                      <button class="editor-tool" type="button" data-field-type="date">날짜</button>
+                      <button class="editor-tool" type="button" data-field-type="check">체크</button>
+                      <button class="editor-tool" type="button" data-field-type="sign">서명</button>
+                    </div>
+                    <div class="editor-tool-group">
+                      <button class="editor-tool" type="button" data-starter="consent">기본 동의서</button>
+                      <button class="editor-tool" type="button" data-starter="application">신청서</button>
+                      <button class="editor-tool" type="button" data-starter="pledge">서약서</button>
+                    </div>
+                  </div>
+
+                  <div id="template-selection-toolbar" class="template-selection-toolbar">
+                    <div class="template-selection-meta">
+                      <strong id="template-selection-title">입력칸 선택됨</strong>
+                      <span id="template-selection-detail">설정 수정, 삭제, 크기 조정이 가능합니다.</span>
+                    </div>
+                    <div class="template-selection-actions">
+                      <button class="mini-btn" id="edit-selected-field" type="button">설정</button>
+                      <select id="template-selection-size" aria-label="입력칸 크기">
+                        <option value="small">작게</option>
+                        <option value="medium">보통</option>
+                        <option value="wide">넓게</option>
+                        <option value="full">한 줄 전체</option>
+                      </select>
+                      <button class="mini-btn danger" id="delete-selected-field" type="button">삭제</button>
+                    </div>
+                  </div>
+
+                  <div id="template-live-editor" class="template-live-editor" contenteditable="true" data-placeholder="여기에 실제 출력될 양식을 입력하세요."></div>
+
+                  <div class="template-live-footer">
+                    <span id="template-field-count" class="tag">필드 0개</span>
+                    <span id="template-required-count" class="tag">필수 0개</span>
+                    <span id="template-optional-count" class="tag">선택 0개</span>
+                    <span id="template-sign-count" class="tag">서명 0개</span>
+                  </div>
+
+                  <div class="template-field-manager">
+                    <div class="template-field-manager-head">
+                      <strong>입력칸 목록</strong>
+                      <span class="muted">목록에서 위치 확인, 설정 수정, 삭제를 할 수 있습니다.</span>
+                    </div>
+                    <div id="template-field-list" class="template-field-list">
+                      <div class="empty-state">입력칸을 추가하면 여기에서 관리할 수 있습니다.</div>
+                    </div>
+                  </div>
+
+                  <details class="advanced-html-editor">
+                    <summary>고급: 저장될 HTML 직접 확인 / 수정</summary>
+                    <textarea id="template-content" class="code-area" rows="12" placeholder="HTML 본문과 [[text:...]], [[date:...]], [[check:...]], [[sign:...]] 태그를 입력하세요."></textarea>
+                  </details>
+                </section>
               </form>
             </div>
           </section>
@@ -244,6 +326,59 @@
       <div class="modal-actions">
         <button class="btn secondary" id="print-detail" type="button">PDF 저장/인쇄</button>
       </div>
+    </div>
+  </div>
+
+  <div id="template-field-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">Field Settings</p>
+          <h2 id="template-field-modal-title">입력칸 설정</h2>
+        </div>
+        <button class="icon-btn" id="close-template-field" type="button" aria-label="닫기">×</button>
+      </div>
+      <form id="template-field-form" class="form-grid">
+        <label>종류
+          <select id="template-field-type">
+            <option value="text">입력칸</option>
+            <option value="date">날짜</option>
+            <option value="check">체크</option>
+            <option value="sign">서명</option>
+          </select>
+        </label>
+        <label>표시 이름
+          <input id="template-field-label" placeholder="예: 성명">
+        </label>
+        <label>저장용 이름
+          <input id="template-field-name" placeholder="예: 성명">
+        </label>
+        <label>크기
+          <select id="template-field-size">
+            <option value="small">작게</option>
+            <option value="medium">보통</option>
+            <option value="wide">넓게</option>
+            <option value="full">한 줄 전체</option>
+          </select>
+        </label>
+        <label id="template-field-placeholder-wrap" class="full">입력 안내
+          <input id="template-field-placeholder" placeholder="예: 성명을 입력하세요">
+        </label>
+        <label id="template-field-role-wrap" class="full">서명 역할
+          <input id="template-field-role" placeholder="예: 본인">
+        </label>
+        <label class="check-line full">
+          <input id="template-field-required" type="checkbox" checked>
+          <span>필수 항목</span>
+        </label>
+        <div class="full template-field-preview">
+          <code id="template-field-tag-preview">[[text:성명|required]]</code>
+        </div>
+        <div class="modal-actions full">
+          <button class="btn secondary" id="cancel-template-field" type="button">취소</button>
+          <button class="btn primary" type="submit">적용</button>
+        </div>
+      </form>
     </div>
   </div>
 
